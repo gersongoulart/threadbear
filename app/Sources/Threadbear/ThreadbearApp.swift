@@ -53,17 +53,10 @@ struct ThreadbearApp: App {
         .defaultLaunchBehavior(.presented)
         .restorationBehavior(.disabled)
         .commands {
-            // The app menu's Settings… made here rather than left to the
-            // Settings scene, so its key comes from the shortcut list and
-            // Settings > Keyboard can change it. It opens the same window.
-            CommandGroup(replacing: .appSettings) {
+            // The Den, in place of the stock About panel.
+            CommandGroup(replacing: .appInfo) {
                 IconMenuItems {
-                    SettingsLink { Label("Settings…", systemImage: "gearshape") }
-                        .shortcut(.settings)
-                }
-            }
-            CommandGroup(after: .appInfo) {
-                IconMenuItems {
+                    Button("About Threadbear", systemImage: "pawprint") { DenWindow.show(app: app) }
                     // Only while a newer build is staged (AppUpdater).
                     if let staged = updater.staged {
                         Button("Restart to Update to \(staged.short)", systemImage: "arrow.clockwise") { updater.restartToUpdate() }
@@ -187,6 +180,19 @@ struct ThreadbearApp: App {
             SettingsView()
                 .environment(app)
         }
+        // The app menu's Settings… made here rather than left to the
+        // Settings scene, so its key comes from the shortcut list and
+        // Settings > Keyboard can change it. It opens the same window.
+        // On the Settings scene, not the main window: from there the
+        // scene's own Settings… stayed beside it, two in the menu (7 Nov).
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                IconMenuItems {
+                    SettingsLink { Label("Settings…", systemImage: "gearshape") }
+                        .shortcut(.settings)
+                }
+            }
+        }
     }
 }
 
@@ -226,6 +232,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             // Not over the pages a screenshot, perf or scripted run opens.
             Tour.shared.introsEnabled = !scripted
             if !scripted { Notifier.setUp(delegate: self) }
+            if !scripted { app.milestones = MilestoneWatch() }
             app.onThreadsLoaded = { [weak self] in
                 LaunchClock.threadsLoaded()
                 if let threadId = self?.linkedThread {

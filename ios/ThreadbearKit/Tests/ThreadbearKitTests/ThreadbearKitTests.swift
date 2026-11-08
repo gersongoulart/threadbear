@@ -418,6 +418,13 @@ import UniformTypeIdentifiers
         }
     }
 
+    /// An older backend leaves pushOff out, and that means it can send.
+    @Test func onlyABackendThatSaysSoCantNotify() {
+        #expect(PhoneIdentity(name: "p", expiresAt: nil).sendsNotifications)
+        #expect(PhoneIdentity(name: "p", expiresAt: nil, pushOff: false).sendsNotifications)
+        #expect(!PhoneIdentity(name: "p", expiresAt: nil, pushOff: true).sendsNotifications)
+    }
+
     @Test func siteURLBecomesCloud() throws {
         let url = URL(string: "threadbear://pair?url=https://happy-bear-123.convex.site&token=t")!
         #expect(try #require(Pairing.parse(url)).deploymentURL.host() == "happy-bear-123.convex.cloud")
@@ -448,7 +455,11 @@ import UniformTypeIdentifiers
     @Test func sendRunsATurnAndReplies() async throws {
         let backend = FakeBackend(turnDelay: .milliseconds(10))
         _ = try await backend.send(threadId: "a3", text: "thanks")
-        try await Task.sleep(for: .milliseconds(100))
+        try await eventually {
+            var it = backend.thread("a3").makeAsyncIterator()
+            guard let d = try await it.next() ?? nil else { return false }
+            return d.messages.suffix(2).map(\.role) == [.user, .assistant] && d.thread.status == .idle
+        }
         var iterator = backend.thread("a3").makeAsyncIterator()
         let detail = try #require(try await iterator.next() ?? nil)
         #expect(detail.messages.suffix(2).map(\.role) == [.user, .assistant])
@@ -462,7 +473,7 @@ import UniformTypeIdentifiers
     @Test func sampleDataHasNothingPersonal() throws {
         let sample = FakeBackend.sample(now: .now)
         let encoder = JSONEncoder()
-        let text = (String(decoding: try encoder.encode(sample.threads), as: UTF8.self)
+        let text = (String(decoding: try encoder.encode(sample.threads + FakeBackend.manyThreads(now: .now)), as: UTF8.self)
             + String(decoding: try encoder.encode(sample.messages), as: UTF8.self)
             + String(decoding: try encoder.encode(FakeBackend.sampleProjects), as: UTF8.self)).lowercased()
         for word in ["poddle", "walkies", "quick ask", "stash it", "cannvas", "bruce", "tinker", "backblaze",
@@ -548,7 +559,10 @@ struct FailingTransport: ConvexTransport {
     @Test func fakeLoadEarlierPrependsOlderMessages() async throws {
         let backend = FakeBackend(turnDelay: .milliseconds(20))
         _ = try await backend.loadEarlier(threadId: "a3", beforeSeq: 120)
-        try await Task.sleep(for: .milliseconds(100))
+        try await eventually {
+            var it = backend.thread("a3").makeAsyncIterator()
+            return try await it.next()??.messages.first?.seq == 70
+        }
         var iterator = backend.thread("a3").makeAsyncIterator()
         let detail = try #require(try await iterator.next() ?? nil)
         #expect(detail.messages.first?.seq == 70)

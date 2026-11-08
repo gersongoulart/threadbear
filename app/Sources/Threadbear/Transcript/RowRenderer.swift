@@ -19,6 +19,9 @@ enum RowMetrics {
     /// One line of work: a group summary, a tool call, a thinking block.
     static var workHeight: CGFloat { zoomed(32) }
     static var workingHeight: CGFloat { zoomed(34) }
+    /// The bear beside a "Woke up" note, and all the room it takes.
+    static var wokenBearSide: CGFloat { zoomed(18) }
+    static var wokenBearRoom: CGFloat { wokenBearSide + zoomed(6) }
     static var bubblePadH: CGFloat { zoomed(14) }
     static var bubblePadV: CGFloat { zoomed(10) }
     static var bubbleRadius: CGFloat { zoomed(18) }
@@ -78,6 +81,24 @@ enum RowMetrics {
     static func column(for row: TranscriptRow, tableWidth: CGFloat) -> (x: CGFloat, width: CGFloat) {
         let (x, width) = column(tableWidth: tableWidth)
         return row.inGroup ? (x + groupIndent, width - groupIndent) : (x, width)
+    }
+}
+
+/// A card with calls queued on it (docs/protocol.md, "Queued calls"):
+/// what's shared by its measuring (RowRenderer) and its layout
+/// (ApprovalRowCell).
+enum StackedApproval {
+    static var gap: CGFloat { zoomed(22) }
+    static var toggleHeight: CGFloat { zoomed(24) }
+    static var toggleWidth: CGFloat { zoomed(34) }
+    /// The tick and cross beside each call's title.
+    static var togglesWidth: CGFloat { toggleWidth * 2 + zoomed(6) + zoomed(12) }
+
+    /// "Make these 4 changes?" when every call edits or writes a file,
+    /// "Allow these 4 steps?" otherwise.
+    static func title(_ calls: [ApprovalRequest]) -> String {
+        let edits: Set<String> = ["Edit", "MultiEdit", "Write", "NotebookEdit"]
+        return calls.allSatisfy { edits.contains($0.name) } ? "Make these \(calls.count) changes?" : "Allow these \(calls.count) steps?"
     }
 }
 
@@ -410,6 +431,7 @@ enum RowRenderer {
                                  detail: body, detailSize: size)
             }
             let inner = width - RowMetrics.cardPad * 2 - RowMetrics.accentBar
+            if !item.queued.isEmpty { return stackedApprovalRender(item, inner: inner, vertical: vertical, measurer: measurer) }
             let title = approvalTitleText(item)
             let titleSize = measurer.measure(title, width: inner)
             let payload = item.isStartRequest ? startRequestPayload(item.startRequest) : approvalPayload(item.request)
@@ -490,8 +512,11 @@ enum RowRenderer {
                 return RowRender(height: RowMetrics.workHeight, text: header, textSize: header.size())
             }
             let text = NSAttributedString(string: note, attributes: Theme.text(Theme.smallFont, color: Theme.quietText, line: TypeScale.scaled(17), alignment: .center))
-            let size = measurer.measure(text, width: width)
-            return RowRender(height: vertical + size.height, text: text, textSize: size)
+            // A wake note's bear sits left of the words, and they stay
+            // centred, so they leave its room on both sides.
+            let woke = row.content.isWakeNote
+            let size = measurer.measure(text, width: woke ? width - 2 * RowMetrics.wokenBearRoom : width)
+            return RowRender(height: vertical + (woke ? max(size.height, RowMetrics.wokenBearSide) : size.height), text: text, textSize: size)
 
         case .error(let message, let kind):
             let text = NSMutableAttributedString(string: message, attributes: Theme.text(color: .systemRed))
@@ -1025,6 +1050,31 @@ enum RowRenderer {
 
     // MARK: Cards
 
+    /// A card with the agent's other calls queued on it (docs/protocol.md,
+    /// "Queued calls"), the one Mike picked from mockups (8 Nov 2026): its
+    /// own call and each queued one in turn, each with its title, its
+    /// diff or command, and a tick and cross; Allow and Deny all under
+    /// them. `parts` has a part per call, `lineHeights` each title's height.
+    static func stackedApprovalRender(_ item: ApprovalItem, inner: CGFloat, vertical: CGFloat, measurer: TextMeasurer) -> RowRender {
+        let calls = [item.request] + item.queued
+        let title = NSAttributedString(string: StackedApproval.title(calls), attributes: Theme.text(Theme.cardTitleFont, line: TypeScale.scaled(20)))
+        let titleSize = measurer.measure(title, width: inner)
+        var height = RowMetrics.cardPad * 2 + titleSize.height
+        var parts: [RowRender.Part] = []
+        var heads: [CGFloat] = []
+        for call in calls {
+            let head = approvalTitleText(ApprovalItem(request: call, root: item.root))
+            let headHeight = measurer.measure(head, width: inner - StackedApproval.togglesWidth).height
+            let body = approvalPayload(call)
+            let bodyHeight = measurer.measure(body, width: inner - RowMetrics.boxPad * 2).height
+            parts.append(RowRender.Part(leading: head, body: body, bodyHeight: bodyHeight))
+            heads.append(headHeight)
+            height += StackedApproval.gap + max(headHeight, StackedApproval.toggleHeight) + zoomed(8) + bodyHeight + RowMetrics.boxPad * 2
+        }
+        height += zoomed(12) + RowMetrics.buttonHeight
+        return RowRender(height: vertical + zoomed(4) + height, text: title, textSize: titleSize, lineHeights: heads, parts: parts)
+    }
+
     /// "Write release.sh?" and, for a file, its folder after it, dimmed, as
     /// file rows show it. The card's tooltip has the whole path.
     static func approvalTitleText(_ item: ApprovalItem) -> NSAttributedString {
@@ -1074,9 +1124,10 @@ enum RowRenderer {
             let call = ToolCall(itemId: request.approvalId, name: request.name, kind: request.name == "Write" ? .write : .edit,
                                 title: request.title, input: input)
             if let diff = DiffBuilder.diff(forTool: call), !diff.hunks.isEmpty {
-                // A file Threadbear runs as code shows every line it writes:
-                // a hook past the eighth line is still a hook.
+                // A file Threadbear runs as code, or can't rule out, shows
+                // every line it writes: a hook past the eighth line is still a hook.
                 let code = request.title.contains("Threadbear runs this file as code")
+                    || request.title.contains("Threadbear can't tell whether this file runs as code")
                 return diffText([diff], maxLines: code ? 1_000_000 : 8, inset: 0).0
             }
             return mono(ToolPresentation.shortTitle(ApprovalText.filePath(request) ?? "", limit: 300), Theme.quietText)
@@ -1105,6 +1156,7 @@ enum RowRenderer {
         let output = NSMutableAttributedString(string: "\(info.request.runnerName) wants to start a thread on \(place)", attributes: titleAttributes)
         var notes: [String] = []
         if info.target == nil { notes.append("It asked for \u{201C}\(info.request.target)\u{201D}, which isn't one of your machines.") }
+        if let folder = info.missingFolder { notes.append("\(folder) isn't a folder on this Mac. Start it sends the request back, to ask again with one that is.") }
         if let why = info.request.why?.trimmingCharacters(in: .whitespacesAndNewlines), !why.isEmpty { notes.append(why) }
         if !notes.isEmpty { output.append(NSAttributedString(string: "\n" + notes.joined(separator: "\n"), attributes: quiet)) }
         return output
@@ -1639,6 +1691,15 @@ enum RowRenderer {
         ]))
         output.append(arrow("›", page + 1))
         return output
+    }
+
+    /// Where a paged card's page number is in its text: the 2 of "2 of 3",
+    /// which `asksHeading` sets off with non-breaking spaces, so an ask's
+    /// own "2 of 3" further on isn't taken for it.
+    static func pageNumberRange(in text: String) -> NSRange? {
+        guard let match = text.range(of: "\u{00A0}\u{00A0}[0-9]+ of [0-9]+\u{00A0}\u{00A0}", options: .regularExpression) else { return nil }
+        let found = text[match].drop { !$0.isNumber }.prefix { $0.isNumber }
+        return NSRange(found.startIndex..<found.endIndex, in: text)
     }
 
     /// The done card: the agent said nothing waits on Mike, so it says
