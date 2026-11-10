@@ -66,11 +66,36 @@ test('words found nowhere in the turn find nothing', () => {
 });
 
 // CPU time, not wall time: the machine running the tests may be busy.
-function cpuMs(work: () => void): number {
+function rawCpuMs(work: () => void): number {
   const start = process.cpuUsage();
   work();
   const used = process.cpuUsage(start);
   return (used.user + used.system) / 1000;
+}
+
+// A fixed piece of string and Map work, about 7 ms of CPU on an idle M-series Mac.
+// Even CPU time stretches when the machine is busy (the runner's release build
+// ran these at 4x on 9 Nov, with every core taken), so each measurement is
+// scaled by how slowly this ran beside it. A real blowup is quadratic, far past it.
+const REFERENCE_MS = 7;
+function reference(): number {
+  const s = 'z '.repeat(4000);
+  const m = new Map<string, number>();
+  let n = 0;
+  for (let i = 0; i < 20_000; i++) {
+    n += s.indexOf(`q${i}`, i % 100);
+    m.set(`k${i % 500}`, i);
+  }
+  return n + m.size;
+}
+reference();
+
+function cpuMs(work: () => void): number {
+  const before = rawCpuMs(reference);
+  const ms = rawCpuMs(work);
+  const after = rawCpuMs(reference);
+  // The quicker of the two, so a stall in one doesn't excuse a slow run.
+  return ms / Math.max(1, Math.min(before, after) / REFERENCE_MS);
 }
 
 test('a work link that quotes a closed link finds nothing, an unclosed one is just words', () => {
