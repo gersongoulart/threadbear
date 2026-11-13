@@ -97,11 +97,13 @@ import Testing
         }
         var h = MessageHistory()
         let pages = (0...1250).map { big((1 + $0 * 8)...(80 + $0 * 8)) }
-        // This thread's CPU time, as other suites run alongside this one.
-        func now() -> Double { Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)) / 1e9 }
-        let start = now()
+        // This thread's CPU time, not the clock: tb land's check runs the kit
+        // beside other suites at low priority, and there the clock read 3.5 to
+        // 13 s while the work itself used under 1 s of CPU (several forks, 11
+        // Nov 2026). The budget stays at 2 s, so a real slowdown still fails.
+        let started = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
         for p in pages { h.takeLive(p) }
-        let took = now() - start
+        let took = Duration.nanoseconds(Int64(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - started))
         let bytes = h.older.reduce(0) { $0 + MessageHistory.bytes(of: $1) }
         #expect(bytes <= MessageHistory.olderMaxBytes)
         #expect(h.older.count < 1100)
@@ -109,7 +111,7 @@ import Testing
         // What went can be loaded again.
         #expect(h.nextBefore == h.older.first?.seq)
         // 1,251 updates; well under a tenth of a millisecond each would do.
-        #expect(took < 2, "took \(took) CPU seconds")
+        #expect(took < .seconds(2), "took \(took)")
     }
 
     @Test func aLongStreamOfSmallRowsKeepsOlderWithinItsRowCap() {
