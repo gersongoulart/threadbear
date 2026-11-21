@@ -219,13 +219,13 @@ fn testAWorkLinkCanPointIntoTheTurnBefore() {
 /// that, and the last turn ends with a summary and a reply.
 fn research() -> Vec<Event> {
     let mut events = vec![
-        mike(1, "Technical Convex video", "t1"),
+        mike(1, "Technical explainer video", "t1"),
         at(event_turn(2, "turn.started", json!({}), Some("t1")), "06:16:00"),
         call_with(3, "c1", "Agent", "task", "Mine the repo", json!({})).with_turn("t1"),
         result(4, "c1").with_turn("t1"),
         turn_text(5, "m1", "The two researchers are still running.", "t1"),
         at(done_turn(6, "t1"), "06:17:23"),
-        woke(7, "t2", "06:23:00", json!([{"kind": "agent", "description": "Mine LBI repo for video stories"}, {"kind": "shell", "description": "Scrape YouTube"}])),
+        woke(7, "t2", "06:23:00", json!([{"kind": "agent", "description": "Mine the repo for video stories"}, {"kind": "shell", "description": "Scrape YouTube"}])),
         note(8, "I read origin/main").with_turn("t2"),
         turn_text(9, "m2", "The repo research is back.", "t2"),
         at(done_turn(10, "t2"), "06:23:14"),
@@ -250,7 +250,7 @@ fn gap_label(model: &TranscriptModel, id: &str) -> String {
 fn testAFinishedStretchMarksEachWaitBetweenReplies() {
     let model = from_events(research());
     assert_eq!(ids(&model), ["u:1", "g:t:c1", "a:m1", "gap:t2", "a:m2", "gap:t3", "a:m4", "f:t3"]);
-    assert_eq!(gap_label(&model, "gap:t2"), "6 min later · Mine LBI repo for video stories finished");
+    assert_eq!(gap_label(&model, "gap:t2"), "6 min later · Mine the repo for video stories finished");
     assert_eq!(gap_label(&model, "gap:t3"), "33s later · Prior art and demand research finished");
 }
 
@@ -315,9 +315,59 @@ fn testATurnMikeStartedHasNoDivider() {
     assert!(!from_events(events).rows().iter().any(|r| r.kind() == RowKind::Gap));
 }
 
+/// A thread that hibernated until the app restarted, woken by the runner's
+/// message: no one wrote, so the 14 hours it sat there get a divider saying
+/// what happened (Mike, 19 Nov, thread 796ef78f).
+fn runner_woken(wake: Option<&str>, woke_note: bool) -> Vec<Event> {
+    let mut fields = json!({"text": "The Threadbear GPUI app has restarted onto daabd88f7, as you asked to hear.", "images": [], "origin": "runner"});
+    if let Some(wake) = wake {
+        fields["wakeReason"] = Value::from(wake);
+    }
+    let mut events = vec![
+        mike(1, "Land it", "t1"),
+        at(event_turn(2, "turn.started", json!({}), Some("t1")), "08:57:36"),
+        final_text(3, "m1", "Landed. Hibernating until the app restarts.", "t1"),
+        at(done_turn(4, "t1"), "08:58:08"),
+        note(5, "Threadbear GPUI app restarted: 0ae1007e7 to daabd88f7"),
+    ];
+    if woke_note {
+        events.push(note(6, "Woke up after 14 hours: the app restarted."));
+    }
+    events.extend([
+        at(event_turn(7, "user.message", fields, Some("t2")), "23:11:51"),
+        at(event_turn(8, "turn.started", json!({}), Some("t2")), "23:11:51"),
+        final_text(9, "m2", "The Archive menu is live on your Mac now.", "t2"),
+        at(done_turn(10, "t2"), "23:14:16"),
+    ]);
+    events
+}
+
+#[test]
+fn testATurnTheRunnersMessageStartedSaysWhatWokeIt() {
+    let model = from_events(runner_woken(Some("The Threadbear GPUI app restarted onto daabd88f7"), false));
+    assert_eq!(gap_label(&model, "gap:t2"), "14 h 14 min later · The Threadbear GPUI app restarted onto daabd88f7");
+    let shown = ids(&model);
+    let at = |id: &str| shown.iter().position(|r| r == id).unwrap_or_else(|| panic!("{id} in {shown:?}"));
+    assert!(at("a:m1") < at("gap:t2") && at("gap:t2") < at("a:m2"), "{shown:?}");
+}
+
+/// From a runner too old to say why: still marked, as Threadbear's doing.
+#[test]
+fn testARunnerWakeWithNoReasonSaysThreadbearWokeIt() {
+    let model = from_events(runner_woken(None, false));
+    assert_eq!(gap_label(&model, "gap:t2"), "14 h 14 min later · Threadbear woke it");
+}
+
+/// A "Woke up" note already says it: no divider as well.
+#[test]
+fn testAWakeNoteMeansNoDividerAsWell() {
+    let model = from_events(runner_woken(Some("The app restarted"), true));
+    assert!(!model.rows().iter().any(|r| r.kind() == RowKind::Gap), "{:?}", ids(&model));
+}
+
 #[test]
 fn testLabels() {
-    let gap = |seconds: f64, tasks: Vec<BackgroundTask>| TurnGap { from: 0.0, to: seconds, woke_by: tasks }.label();
+    let gap = |seconds: f64, tasks: Vec<BackgroundTask>| TurnGap { from: 0.0, to: seconds, woke_by: tasks, runner_wake: None }.label();
     let task = |description: &str| BackgroundTask::new(BackgroundKind::Agent, description, false);
     assert_eq!(gap(0.5, vec![]), "Moments later");
     assert_eq!(gap(45.0, vec![]), "45s later");
@@ -333,7 +383,7 @@ fn testLabels() {
 /// Swift app's one-line label does (thread a92fcf9a).
 #[test]
 fn testALabelIsOneLine() {
-    let line = |description: &str| TurnGap { from: 0.0, to: 180.0, woke_by: vec![BackgroundTask::new(BackgroundKind::Shell, description, true)] }.label_line();
+    let line = |description: &str| TurnGap { from: 0.0, to: 180.0, woke_by: vec![BackgroundTask::new(BackgroundKind::Shell, description, true)], runner_wake: None }.label_line();
     assert_eq!(line("git commit -qm \"Fix it\n\nWhy: it broke\""), "3 min later · git commit -qm \"Fix it…");
     assert_eq!(line("npm test"), "3 min later · npm test finished");
     assert_eq!(line("npm test\n"), "3 min later · npm test finished");
@@ -434,15 +484,15 @@ fn testAMessageSentIntoTheTurnStartsAFreshAnswer() {
         result(3, "c1"),
         event(4, "assistant.text", json!({"itemId": "m1", "text": "Added an end-to-end test that walks all 14 tour steps on a real runner.", "narration": true})),
         e1_end_turn(5),
-        result_text(6, "e1", "Noted. Mike got only a short summary"),
+        result_text(6, "e1", "Noted. Alex got only a short summary"),
         event(7, "user.message", json!({"text": "The app has restarted onto 062f66a", "images": [], "origin": "runner"})),
         text(8, "m2", "The tour now has an end-to-end test against a real runner, and the fixes are on main."),
         call_input(9, "c2", json!({"command": "tb status"})),
         result(10, "c2"),
-        event(11, "assistant.text", json!({"itemId": "m3", "text": "M5 is updated with the fixes and Tinker Desk is still building.", "narration": true})),
+        event(11, "assistant.text", json!({"itemId": "m3", "text": "The laptop is updated with the fixes and build-box is still building.", "narration": true})),
         call_with(12, "e2", "mcp__threadbear__end_turn", "mcp", "end_turn", json!({})),
         result_with(13, "e2", false, "Already ended", json!([])),
-        text(14, "m4", "Your M5 app is now on 062f66a, with the fixes the end-to-end test found. Tinker Desk is still building."),
+        text(14, "m4", "Your laptop app is now on 062f66a, with the fixes the end-to-end test found. build-box is still building."),
         done(15),
     ]);
     let shown: Vec<String> = model.rows().iter().filter(|r| matches!(r.content, RowContent::Assistant(_))).map(|r| r.id.clone()).collect();

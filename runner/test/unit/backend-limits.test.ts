@@ -5,12 +5,15 @@
 // (test/helpers/convex-memory.ts), which counts the bytes a call reads.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { call, load, memoryBackend, outcome, THREAD_BASICS } from '../helpers/convex-memory.ts';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { call, claimAndFinish, load, memoryBackend, outcome, THREAD_BASICS } from '../helpers/convex-memory.ts';
 
 const OWNER = 'owner-key';
-const BRUCE_KEY = 'tbr_bruce';
-const M5 = 'm5runner0001';
-const BRUCE = 'cb921b2447ea';
+const MINI_KEY = 'tbr_mac-mini';
+const LAPTOP = 'laptop000001';
+const MINI = 'cb921b2447ea';
 const TOKEN = 'phone-token';
 const OTHER_TOKEN = 'other-phone';
 const DAY = 24 * 60 * 60_000;
@@ -25,19 +28,20 @@ const relay = load('relay');
 const tokens = load('tokens');
 const devices = load('devices');
 
-async function setup() {
+// `root`: a copy of convex/ to run instead (a stepping-stone test).
+async function setup(root?: string) {
   process.env.RUNNER_KEY = OWNER;
   delete process.env.RUNNER_KEY_NEXT;
   process.env.CONVEX_SITE_URL = 'https://site.example';
-  const b = memoryBackend();
-  await b.ctx.db.insert('runnerKeys', { runnerId: BRUCE, keyHash: await sha256(BRUCE_KEY), name: 'bruce', createdAt: 1 });
+  const b = root ? memoryBackend(root) : memoryBackend();
+  await b.ctx.db.insert('runnerKeys', { runnerId: MINI, keyHash: await sha256(MINI_KEY), name: 'mac-mini', createdAt: 1 });
   const now = Date.now();
   const tokenId = await b.ctx.db.insert('tokens', { hash: await sha256(TOKEN), name: 'iphone', kind: 'phone', expiresAt: now + 100 * DAY, createdAt: now });
   const otherId = await b.ctx.db.insert('tokens', { hash: await sha256(OTHER_TOKEN), name: 'web', kind: 'browser', expiresAt: now + 100 * DAY, createdAt: now });
   // A backend whose rows from before the limits have been seen to (limitsMigration); its own tests start without.
   await b.ctx.db.insert('backendMarks', { name: 'limits-2026-11-07' });
   await b.ctx.db.insert('backendMarks', { name: 'limits-2026-11-07-done' });
-  for (const [runnerId, byOwner] of [[M5, true], [BRUCE, false]] as const) {
+  for (const [runnerId, byOwner] of [[LAPTOP, true], [MINI, false]] as const) {
     await b.ctx.db.insert('runners', { runnerId, name: runnerId, version: 'v', startedAt: 'x', draining: false, threadCount: 1, lastSeenAt: now, ...(byOwner ? { byOwner } : {}) });
   }
   return { ...b, tokenId, otherId };
@@ -48,8 +52,8 @@ const thread = (threadId: string, runnerId: string) => ({ threadId, runnerId, ..
 
 // A file uploaded the way a runner key's runner does (/runner/upload).
 async function runnerUpload(s: S, id: string, bytes = 1): Promise<string> {
-  const ticket = new URL(await call(s.ctx, sync.iconUploadUrl, { key: BRUCE_KEY })).searchParams.get('ticket')!;
-  assert.equal(await call(s.ctx, sync.redeemUpload, { ticket, storageId: s.file(id), bytes }), true);
+  const ticket = new URL(await call(s.ctx, sync.iconUploadUrl, { key: MINI_KEY })).searchParams.get('ticket')!;
+  assert.equal(await claimAndFinish(s.ctx, sync.claimUpload, sync.finishUpload, { ticket, storageId: s.file(id), bytes }), true);
   return id;
 }
 
@@ -57,7 +61,7 @@ async function runnerUpload(s: S, id: string, bytes = 1): Promise<string> {
 async function phoneUpload(s: S, id: string, token = TOKEN, bytes = 1): Promise<string> {
   const url = new URL(await call(s.ctx, phone.imageUploadUrl, { token }));
   assert.equal(url.origin + url.pathname, 'https://site.example/phone/upload');
-  assert.equal(await call(s.ctx, phone.redeemPhoneUpload, { ticket: url.searchParams.get('ticket'), storageId: s.file(id), bytes }), true);
+  assert.equal(await claimAndFinish(s.ctx, phone.claimPhoneUpload, phone.finishPhoneUpload, { ticket: url.searchParams.get('ticket'), storageId: s.file(id), bytes }), true);
   return id;
 }
 
@@ -78,6 +82,8 @@ async function pruneFilesUntilDone(s: S): Promise<number> {
     s.resetReads();
     await call(s.ctx, sync.pruneFiles, {});
     assert.ok(s.bytesRead() < READ_LIMIT, `run ${runs} read ${s.bytesRead()} bytes`);
+    // What an expiry scheduled (its words and photos going: sync.ts commandEnded), as Convex runs it next.
+    for (const job of s.scheduled.filter((x: any) => /commandEnded/.test(x.fn)) as { args: Record<string, unknown> }[]) await call(s.ctx, sync.commandEnded, job.args);
     if (!s.scheduled.some((x: any) => /pruneFiles/.test(x.fn))) return runs;
   }
   throw new Error('pruneFiles never finished');
@@ -89,7 +95,7 @@ async function unmigrated(s: S) {
   for (const m of s.rows('backendMarks').filter((r) => r.name.startsWith('limits-'))) await s.ctx.db.delete(m._id);
 }
 async function migrate(s: S): Promise<void> {
-  await call(s.ctx, sync.heartbeat, { key: OWNER, runner: { runnerId: M5, name: 'm5', version: 'v', startedAt: 'x', draining: false, threadCount: 1 } });
+  await call(s.ctx, sync.heartbeat, { key: OWNER, runner: { runnerId: LAPTOP, name: 'laptop', version: 'v', startedAt: 'x', draining: false, threadCount: 1 } });
   for (let runs = 0; runs < 2000; runs++) {
     const i = s.scheduled.findIndex((x: any) => /limitsMigration/.test(x.fn));
     if (i < 0) {
@@ -104,20 +110,20 @@ async function migrate(s: S): Promise<void> {
   throw new Error('limitsMigration never finished');
 }
 
-// A `picture` command from the phone, taken by Bruce, as the runner has it when it uploads.
+// A `picture` command from the phone, taken by Mac mini, as the runner has it when it uploads.
 async function askForPicture(s: S, threadId: string, seq: number, index = 0) {
   const commandId = await call(s.ctx, phone.requestPicture, { token: TOKEN, threadId, seq, index });
-  assert.equal(await call(s.ctx, sync.takeCommand, { key: BRUCE_KEY, commandId }), true);
+  assert.equal(await call(s.ctx, sync.takeCommand, { key: MINI_KEY, commandId }), true);
   return commandId;
 }
 
-const held = (s: S, args: Record<string, unknown>) => call(s.ctx, sync.addHeldPicture, { key: BRUCE_KEY, threadId: 'B', seq: 1, index: 0, mediaType: 'image/png', ...args });
+const held = (s: S, args: Record<string, unknown>) => call(s.ctx, sync.addHeldPicture, { key: MINI_KEY, threadId: 'B', seq: 1, index: 0, mediaType: 'image/png', ...args });
 
 // ------------------------------------------------------------ held pictures
 
 test("Daybreak's held-picture PoC: one small upload can't become 20 MB of rows", async () => {
   const s = await setup();
-  await call(s.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [thread('B', BRUCE)] });
+  await call(s.ctx, sync.upsertThreads, { key: MINI_KEY, threads: [thread('B', MINI)] });
   const file = await runnerUpload(s, 'one-byte');
   const big = 'x'.repeat(512 * 1024);
   const kinds: string[] = [];
@@ -128,7 +134,7 @@ test("Daybreak's held-picture PoC: one small upload can't become 20 MB of rows",
 
 test('a runner key holds a picture only when asked, of a type it sends, one row per upload', async () => {
   const s = await setup();
-  await call(s.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [thread('B', BRUCE)] });
+  await call(s.ctx, sync.upsertThreads, { key: MINI_KEY, threads: [thread('B', MINI)] });
   const file = await runnerUpload(s, 'pic');
   // Nobody asked for it.
   assert.equal(await outcome(held(s, { seq: 1, storageId: file })), 'forbidden');
@@ -151,28 +157,32 @@ test('a runner key holds a picture only when asked, of a type it sends, one row 
 
 test("reply and share pictures from a runner key: capped paths, real types, one row per upload", async () => {
   const s = await setup();
-  await call(s.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [thread('B', BRUCE)] });
+  await call(s.ctx, sync.upsertThreads, { key: MINI_KEY, threads: [thread('B', MINI)] });
   const file = await runnerUpload(s, 'f');
-  const reply = (args: Record<string, unknown>) => call(s.ctx, sync.addReplyImage, { key: BRUCE_KEY, threadId: 'B', seq: 1, path: 'a.png', storageId: file, mediaType: 'image/png', ...args });
-  const shared = (args: Record<string, unknown>) => call(s.ctx, sync.addShareImage, { key: BRUCE_KEY, threadId: 'B', seq: 1, path: 'a.png', storageId: file, mediaType: 'image/png', ...args });
+  const reply = (args: Record<string, unknown>) => call(s.ctx, sync.addReplyImage, { key: MINI_KEY, threadId: 'B', seq: 1, path: 'a.png', storageId: file, mediaType: 'image/png', ...args });
+  const shared = (args: Record<string, unknown>) => call(s.ctx, sync.addShareImage, { key: MINI_KEY, threadId: 'B', seq: 1, path: 'a.png', storageId: file, mediaType: 'image/png', ...args });
   assert.equal(await outcome(reply({ path: 'p'.repeat(512 * 1024) })), 'badArgs');
   assert.equal(await outcome(reply({ src: 's'.repeat(512 * 1024) })), 'badArgs');
   assert.equal(await outcome(shared({ mediaType: 'm'.repeat(512 * 1024) })), 'badArgs');
   assert.equal(await outcome(reply({})), 'ok');
+  // A live page (API 95) is a reply's to send, never a shared page's picture.
+  const page = await runnerUpload(s, 'page');
+  assert.equal(await outcome(shared({ storageId: page, path: 'g.html', mediaType: 'text/html' })), 'badArgs');
+  assert.equal(await outcome(reply({ storageId: page, seq: 7, path: 'g.html', mediaType: 'text/html' })), 'ok');
   // The same upload again under new seqs, in either table.
   for (let seq = 2; seq < 6; seq++) assert.equal(await outcome(reply({ seq })), 'forbidden');
   assert.equal(await outcome(shared({ seq: 9 })), 'forbidden');
-  assert.equal(s.rows('replyImages').length + s.rows('shareImages').length, 1);
+  assert.equal(s.rows('replyImages').length + s.rows('shareImages').length, 2, 'the picture and the page');
   // The owner's runner is trusted with its own rows, as before.
-  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('O', M5)] });
+  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('O', LAPTOP)] });
   const mine = s.file('owner-file');
   await call(s.ctx, sync.addReplyImage, { key: OWNER, threadId: 'O', seq: 1, path: 'x.heic', storageId: mine, mediaType: 'image/heic' });
-  assert.equal(s.rows('replyImages').length, 2);
+  assert.equal(s.rows('replyImages').length, 3);
 });
 
 test('cleanup of many oversized held pictures sharing one file stays under the read limit, even with one expired', async () => {
   const s = await setup();
-  await call(s.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [thread('B', BRUCE)] });
+  await call(s.ctx, sync.upsertThreads, { key: MINI_KEY, threads: [thread('B', MINI)] });
   const file = await runnerUpload(s, 'shared');
   // Rows from before the caps (written straight to the table), 40 x 512 KiB on one file.
   const big = 'x'.repeat(512 * 1024);
@@ -197,13 +207,13 @@ test('cleanup of many oversized held pictures sharing one file stays under the r
 
 test('a file in a waiting command is found without reading every waiting command', async () => {
   const s = await setup();
-  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('T', M5)] });
+  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('T', LAPTOP)] });
   // Lots waiting for another runner, each carrying a big message.
-  for (let i = 0; i < 30; i++) await s.ctx.db.insert('commands', { runnerId: BRUCE, kind: 'create', args: { text: 'w'.repeat(600 * 1024) }, state: 'pending', createdAt: Date.now() });
+  for (let i = 0; i < 30; i++) await s.ctx.db.insert('commands', { runnerId: MINI, kind: 'create', args: { text: 'w'.repeat(600 * 1024) }, state: 'pending', createdAt: Date.now() });
   // A photo in two messages, as phone.ts queue records them.
   const photo = s.file('photo');
   const send = async () => {
-    const commandId = await s.ctx.db.insert('commands', { runnerId: M5, threadId: 'T', kind: 'send', args: { text: 'look', images: [{ storageId: photo, url: 'u' }] }, state: 'pending', createdAt: Date.now() });
+    const commandId = await s.ctx.db.insert('commands', { runnerId: LAPTOP, threadId: 'T', kind: 'send', args: { text: 'look', images: [{ storageId: photo, url: 'u' }] }, state: 'pending', createdAt: Date.now() });
     await s.ctx.db.insert('commandFiles', { storageId: photo, commandId });
     return commandId;
   };
@@ -225,10 +235,9 @@ test('phone uploads go through a ticket of its own, with an hourly and daily all
   const url = new URL(await call(s.ctx, phone.imageUploadUrl, { token: TOKEN }));
   assert.equal(url.pathname, '/phone/upload', 'not a raw Convex upload URL');
   const ticket = url.searchParams.get('ticket')!;
-  assert.equal(await call(s.ctx, phone.phoneTicketOk, { ticket }), true);
   // Too big; then spent.
-  assert.equal(await call(s.ctx, phone.redeemPhoneUpload, { ticket, storageId: s.file('huge'), bytes: 11 * 1024 * 1024 }), false);
-  assert.equal(await call(s.ctx, phone.phoneTicketOk, { ticket }), false);
+  assert.equal(await claimAndFinish(s.ctx, phone.claimPhoneUpload, phone.finishPhoneUpload, { ticket, storageId: s.file('huge'), bytes: 11 * 1024 * 1024 }), false);
+  assert.equal(await call(s.ctx, phone.claimPhoneUpload, { ticket }), false);
   // An hour's worth, then no more URLs.
   let refused = 'ok';
   let n = 1;
@@ -240,7 +249,7 @@ test('phone uploads go through a ticket of its own, with an hourly and daily all
   let later429 = false;
   for (let i = 0; i < 40 && !later429; i++) {
     const t = new URL(await later(i * 60 * 60_000 / 2, () => call(s2.ctx, phone.imageUploadUrl, { token: OTHER_TOKEN }))).searchParams.get('ticket');
-    later429 = (await later(i * 60 * 60_000 / 2, () => call(s2.ctx, phone.redeemPhoneUpload, { ticket: t, storageId: s2.file(`p${i}`), bytes: 9 * 1024 * 1024 }))) === 'later';
+    later429 = (await later(i * 60 * 60_000 / 2, () => claimAndFinish(s2.ctx, phone.claimPhoneUpload, phone.finishPhoneUpload, { ticket: t, storageId: s2.file(`p${i}`), bytes: 9 * 1024 * 1024 }))) === 'later';
   }
   assert.ok(later429, 'over the day it answers later');
 });
@@ -249,13 +258,13 @@ test("a revoked phone's ticket stores nothing", async () => {
   const s = await setup();
   const ticket = new URL(await call(s.ctx, phone.imageUploadUrl, { token: TOKEN })).searchParams.get('ticket');
   await call(s.ctx, sync.revokeToken, { key: OWNER, id: s.tokenId });
-  assert.equal(await call(s.ctx, phone.phoneTicketOk, { ticket }), false);
-  assert.equal(await call(s.ctx, phone.redeemPhoneUpload, { ticket, storageId: s.file('late'), bytes: 1 }), false);
+  assert.equal(await call(s.ctx, phone.claimPhoneUpload, { ticket }), false);
+  assert.equal(await claimAndFinish(s.ctx, phone.claimPhoneUpload, phone.finishPhoneUpload, { ticket, storageId: s.file('late'), bytes: 1 }), false);
 });
 
 test("a photo picked and never sent goes after a day; one in a waiting message stays until it's taken", async () => {
   const s = await setup();
-  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('T', M5)] });
+  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('T', LAPTOP)] });
   const orphan = await phoneUpload(s, 'orphan');
   const sent = await phoneUpload(s, 'sent');
   const commandId = await call(s.ctx, phone.send, { token: TOKEN, threadId: 'T', text: 'x', images: [sent] });
@@ -270,13 +279,13 @@ test("a photo picked and never sent goes after a day; one in a waiting message s
 
 test("discardImage deletes only this phone's own unsent uploads", async () => {
   const s = await setup();
-  await call(s.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [thread('B', BRUCE)] });
-  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('O', M5)] });
-  // Bruce's share picture, the owner's reply picture and project icon, a held
+  await call(s.ctx, sync.upsertThreads, { key: MINI_KEY, threads: [thread('B', MINI)] });
+  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('O', LAPTOP)] });
+  // Mac mini's share picture, the owner's reply picture and project icon, a held
   // picture, a runner key's upload not yet attached, another token's photo,
   // and a file with no record at all.
   const shareFile = await runnerUpload(s, 'share');
-  await call(s.ctx, sync.addShareImage, { key: BRUCE_KEY, threadId: 'B', seq: 1, path: 'a.png', storageId: shareFile, mediaType: 'image/png' });
+  await call(s.ctx, sync.addShareImage, { key: MINI_KEY, threadId: 'B', seq: 1, path: 'a.png', storageId: shareFile, mediaType: 'image/png' });
   const replyFile = s.file('reply');
   await call(s.ctx, sync.addReplyImage, { key: OWNER, threadId: 'O', seq: 1, path: 'r.png', storageId: replyFile, mediaType: 'image/png' });
   const loose = await runnerUpload(s, 'loose');
@@ -295,9 +304,9 @@ test("discardImage deletes only this phone's own unsent uploads", async () => {
 
 test("a phone's message can carry only that phone's own uploads", async () => {
   const s = await setup();
-  await call(s.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [thread('B', BRUCE)] });
+  await call(s.ctx, sync.upsertThreads, { key: MINI_KEY, threads: [thread('B', MINI)] });
   const shareFile = await runnerUpload(s, 'share');
-  await call(s.ctx, sync.addShareImage, { key: BRUCE_KEY, threadId: 'B', seq: 1, path: 'a.png', storageId: shareFile, mediaType: 'image/png' });
+  await call(s.ctx, sync.addShareImage, { key: MINI_KEY, threadId: 'B', seq: 1, path: 'a.png', storageId: shareFile, mediaType: 'image/png' });
   const refused = async (storageId: string) => assert.equal(await outcome(call(s.ctx, phone.send, { token: TOKEN, threadId: 'B', text: 'x', images: [storageId] })), 'notFound', storageId);
   for (const storageId of [shareFile, s.file('bare')]) await refused(storageId);
   await refused(await phoneUpload(s, 'theirs', OTHER_TOKEN));
@@ -314,7 +323,7 @@ test("a phone can't queue commands for a runner that doesn't exist", async () =>
   assert.equal(await outcome(call(s.ctx, phone.quickAsk, { token: TOKEN, question: 'q', answer: 'a', askedAt: 1, runnerId: 'fake-runner-2' })), 'notFound');
   assert.equal(s.rows('commands').length, 0);
   // Real ones, and "any", still go.
-  assert.equal(await outcome(call(s.ctx, phone.create, { token: TOKEN, text: 'x', runnerId: BRUCE })), 'ok');
+  assert.equal(await outcome(call(s.ctx, phone.create, { token: TOKEN, text: 'x', runnerId: MINI })), 'ok');
   assert.equal(await outcome(call(s.ctx, phone.create, { token: TOKEN, text: 'x', runnerId: 'any' })), 'ok');
   assert.equal(await outcome(call(s.ctx, phone.create, { token: TOKEN, text: 'x' })), 'ok');
 });
@@ -323,25 +332,25 @@ test('what waits for one runner is capped, in number and in bytes', async () => 
   const s = await setup();
   let refused = 'ok';
   let n = 0;
-  for (; n < 300 && refused === 'ok'; n++) refused = await outcome(call(s.ctx, phone.create, { token: TOKEN, text: 'x', runnerId: BRUCE }));
+  for (; n < 300 && refused === 'ok'; n++) refused = await outcome(call(s.ctx, phone.create, { token: TOKEN, text: 'x', runnerId: MINI }));
   assert.equal(refused, 'tooMany');
   assert.ok(n <= 201, `stopped after ${n}`);
-  // Another runner isn't held up by Bruce's.
-  assert.equal(await outcome(call(s.ctx, phone.create, { token: TOKEN, text: 'x', runnerId: M5 })), 'ok');
+  // Another runner isn't held up by Mac mini's.
+  assert.equal(await outcome(call(s.ctx, phone.create, { token: TOKEN, text: 'x', runnerId: LAPTOP })), 'ok');
   // Big ones stop sooner, and checking reads no more than the cap.
   const s2 = await setup();
   refused = 'ok';
-  for (n = 0; n < 100 && refused === 'ok'; n++) refused = await outcome(call(s2.ctx, phone.create, { token: TOKEN, text: 'y'.repeat(700 * 1024), runnerId: BRUCE }));
+  for (n = 0; n < 100 && refused === 'ok'; n++) refused = await outcome(call(s2.ctx, phone.create, { token: TOKEN, text: 'y'.repeat(700 * 1024), runnerId: MINI }));
   assert.equal(refused, 'tooMany');
   assert.ok(n < 20, `stopped after ${n}`);
   s2.resetReads();
-  await outcome(call(s2.ctx, phone.create, { token: TOKEN, text: 'y', runnerId: BRUCE }));
+  await outcome(call(s2.ctx, phone.create, { token: TOKEN, text: 'y', runnerId: MINI }));
   assert.ok(s2.bytesRead() < 10 * 1024 * 1024, `read ${s2.bytesRead()}`);
 });
 
 test('a command no runner takes in two weeks is failed and its photos deleted', async () => {
   const s = await setup();
-  await call(s.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [thread('B', BRUCE)] });
+  await call(s.ctx, sync.upsertThreads, { key: MINI_KEY, threads: [thread('B', MINI)] });
   const photo = await phoneUpload(s, 'photo');
   const commandId = await call(s.ctx, phone.send, { token: TOKEN, threadId: 'B', text: 'x', images: [photo] });
   // A week on it's still waiting.
@@ -363,12 +372,12 @@ test('a command no runner takes in two weeks is failed and its photos deleted', 
 
 test('non-finite page sizes are refused, and a page reads only its own rows', async () => {
   const s = await setup();
-  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [{ ...thread('T', M5), share: { access: 'link', slug: 'link1' } }] });
+  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [{ ...thread('T', LAPTOP), share: { access: 'link', slug: 'link1' } }] });
   for (let seq = 1; seq <= 3000; seq++) await s.ctx.db.insert('messages', { threadId: 'T', seq, role: seq % 10 ? 'tool' : 'assistant', text: `m${seq}`, at: 'now' });
   for (const limit of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
     assert.equal(await outcome(call(s.ctx, share.view, { slug: 'link1', limit })), 'invalid', `share ${limit}`);
     assert.equal(await outcome(call(s.ctx, phone.messages, { token: TOKEN, threadId: 'T', limit, tools: true })), 'invalid', `phone ${limit}`);
-    assert.equal(await outcome(call(s.ctx, phone.projectThreads, { token: TOKEN, projectId: 'p', limit })), 'invalid', `projects ${limit}`);
+    assert.equal(await outcome(call(s.ctx, phone.projectThreads, { token: TOKEN, runnerId: LAPTOP, projectId: 'p', limit })), 'invalid', `projects ${limit}`);
     assert.equal(await outcome(call(s.ctx, relay.remoteTail, { key: OWNER, threadId: 'T', limit })), 'invalid', `tail ${limit}`);
     assert.equal(await outcome(call(s.ctx, relay.remoteMessages, { key: OWNER, threadId: 'T', limit })), 'invalid', `remote ${limit}`);
   }
@@ -386,7 +395,7 @@ test('non-finite page sizes are refused, and a page reads only its own rows', as
   assert.ok(text.messages.every((m: any) => m.role !== 'tool'));
   assert.ok(s.reads() <= 2000 + 1 + 4000 + 5, `phone read ${s.reads()} rows`);
   // A thread that's nearly all tool rows: the page stops looking, and says there's more.
-  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('U', M5)] });
+  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('U', LAPTOP)] });
   await s.ctx.db.insert('messages', { threadId: 'U', seq: 1, role: 'user', text: 'first', at: 'now' });
   for (let seq = 2; seq <= 10_000; seq++) await s.ctx.db.insert('messages', { threadId: 'U', seq, role: 'tool', text: 't', at: 'now' });
   s.resetReads();
@@ -473,13 +482,13 @@ test("dropDevices never deletes a live token's phones", async () => {
 test("a runner key's notes on finished commands are cut, and pruneOld reads finished ones by size", async () => {
   const s = await setup();
   for (let i = 0; i < 40; i++) {
-    const commandId = await s.ctx.db.insert('commands', { runnerId: BRUCE, kind: 'create', args: { text: 'x' }, state: 'pending', createdAt: Date.now() });
-    await call(s.ctx, sync.takeCommand, { key: BRUCE_KEY, commandId });
-    await call(s.ctx, sync.finishCommand, { key: BRUCE_KEY, commandId, ok: false, note: 'n'.repeat(512 * 1024) });
+    const commandId = await s.ctx.db.insert('commands', { runnerId: MINI, kind: 'create', args: { text: 'x' }, state: 'pending', createdAt: Date.now() });
+    await call(s.ctx, sync.takeCommand, { key: MINI_KEY, commandId });
+    await call(s.ctx, sync.finishCommand, { key: MINI_KEY, commandId, ok: false, note: 'n'.repeat(512 * 1024) });
   }
   assert.ok(s.rows('commands').every((c) => (c.note ?? '').length <= 500));
   // Big finished rows from before the cut: a run stops by bytes, and carries on.
-  for (let i = 0; i < 40; i++) await s.ctx.db.insert('commands', { runnerId: BRUCE, kind: 'create', args: {}, state: 'failed', note: 'n'.repeat(512 * 1024), createdAt: 1, doneAt: 1 });
+  for (let i = 0; i < 40; i++) await s.ctx.db.insert('commands', { runnerId: MINI, kind: 'create', args: {}, state: 'failed', note: 'n'.repeat(512 * 1024), createdAt: 1, doneAt: 1 });
   await later(2 * DAY, async () => {
     for (let runs = 0; s.rows('commands').length && runs < 50; runs++) {
       s.resetReads();
@@ -492,7 +501,7 @@ test("a runner key's notes on finished commands are cut, and pruneOld reads fini
 
 test('pruneFiles waits for the migration, which cuts big picture rows in every table', async () => {
   const s = await setup();
-  await call(s.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [thread('B', BRUCE)] });
+  await call(s.ctx, sync.upsertThreads, { key: MINI_KEY, threads: [thread('B', MINI)] });
   // 20 small expired held pictures, each on a file a big pre-cap share row also names.
   for (let i = 0; i < 20; i++) {
     const f = await runnerUpload(s, `f${i}`);
@@ -509,7 +518,7 @@ test('pruneFiles waits for the migration, which cuts big picture rows in every t
 
 test('a photo in many messages, all cancelled, is deleted rather than kept for good', async () => {
   const s = await setup();
-  await call(s.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [thread('B', BRUCE)] });
+  await call(s.ctx, sync.upsertThreads, { key: MINI_KEY, threads: [thread('B', MINI)] });
   const photo = await phoneUpload(s, 'photo');
   const ids = [];
   for (let i = 0; i < 25; i++) ids.push(await call(s.ctx, phone.send, { token: TOKEN, threadId: 'B', text: 'x', images: [photo] }));
@@ -524,13 +533,13 @@ test('a photo in many messages, all cancelled, is deleted rather than kept for g
 test('every runner-key upload counts as at least 64 KB, so how many it keeps is bounded', async () => {
   const s = await setup();
   for (let i = 0; i < 3; i++) await runnerUpload(s, `empty${i}`, 0);
-  const usage = s.rows('runnerStorage').find((r) => r.runnerId === BRUCE)!;
+  const usage = s.rows('runnerStorage').find((r) => r.runnerId === MINI)!;
   assert.equal(usage.bytes, 3 * 64 * 1024);
 });
 
 test('a one-message page of a thread of big messages reads only what it needs', async () => {
   const s = await setup();
-  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('T', M5)] });
+  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('T', LAPTOP)] });
   for (let seq = 1; seq <= 1800; seq++) await s.ctx.db.insert('messages', { threadId: 'T', seq, role: 'assistant', text: 'a'.repeat(10_000), at: 'now' });
   s.resetReads();
   const page = await call(s.ctx, phone.messages, { token: TOKEN, threadId: 'T', limit: 1 });
@@ -540,12 +549,12 @@ test('a one-message page of a thread of big messages reads only what it needs', 
 
 test('removing a thread with more than a mutation may read goes in runs, each under the limit', async () => {
   const s = await setup();
-  await call(s.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [thread('B', BRUCE)] });
+  await call(s.ctx, sync.upsertThreads, { key: MINI_KEY, threads: [thread('B', MINI)] });
   const file = await runnerUpload(s, 'held');
   for (let seq = 1; seq <= 40; seq++) await s.ctx.db.insert('heldPictures', { threadId: 'B', seq, index: 0, storageId: file, mediaType: 'x'.repeat(512 * 1024), at: Date.now() });
-  for (let seq = 1; seq <= 2000; seq++) await s.ctx.db.insert('messages', { threadId: 'B', seq, role: 'assistant', text: 'a'.repeat(10_000), at: 'now', runnerId: BRUCE });
+  for (let seq = 1; seq <= 2000; seq++) await s.ctx.db.insert('messages', { threadId: 'B', seq, role: 'assistant', text: 'a'.repeat(10_000), at: 'now', runnerId: MINI });
   s.resetReads();
-  await call(s.ctx, sync.removeThreads, { key: BRUCE_KEY, threadIds: ['B'] });
+  await call(s.ctx, sync.removeThreads, { key: MINI_KEY, threadIds: ['B'] });
   assert.ok(s.bytesRead() < READ_LIMIT, `remove read ${s.bytesRead()}`);
   for (let runs = 0; runs < 100; runs++) {
     const i = s.scheduled.findIndex((x: any) => /dropThreadRows/.test(x.fn));
@@ -562,7 +571,7 @@ test('removing a thread with more than a mutation may read goes in runs, each un
 
 test("a page's pictures are bounded, and an older page reads only its own", async () => {
   const s = await setup();
-  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [{ ...thread('T', M5), share: { access: 'link', slug: 'pics' } }] });
+  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [{ ...thread('T', LAPTOP), share: { access: 'link', slug: 'pics' } }] });
   for (let seq = 1; seq <= 100; seq++) await s.ctx.db.insert('messages', { threadId: 'T', seq, role: 'assistant', text: 'm', at: 'now' });
   for (let i = 0; i < 2000; i++) await s.ctx.db.insert('shareImages', { threadId: 'T', seq: 100, path: `p${i}`, storageId: s.file(`s${i}`), mediaType: 'image/png' });
   for (let i = 0; i < 50; i++) await s.ctx.db.insert('replyImages', { threadId: 'T', seq: 99, path: `r${i}`, storageId: s.file(`r${i}`), mediaType: 'image/png' });
@@ -581,8 +590,8 @@ test('the migration deletes registrations with no real APNs token, and records f
   for (let i = 0; i < 40; i++) await s.ctx.db.insert('devices', { apnsToken: 'z'.repeat(512 * 1024) + i, environment: 'production', tokenName: 'iphone', tokenId: s.tokenId, updatedAt: i });
   await s.ctx.db.insert('devices', { apnsToken: apns(7), environment: 'production', tokenName: 'iphone', tokenId: s.tokenId, updatedAt: 99 });
   const photo = s.file('old-photo');
-  const a = await s.ctx.db.insert('commands', { runnerId: M5, kind: 'create', args: { text: 'x', images: [{ storageId: photo, url: 'u' }] }, state: 'pending', createdAt: Date.now() });
-  const b = await s.ctx.db.insert('commands', { runnerId: M5, kind: 'create', args: { text: 'y', images: [{ storageId: photo, url: 'u' }] }, state: 'pending', createdAt: Date.now() });
+  const a = await s.ctx.db.insert('commands', { runnerId: LAPTOP, kind: 'create', args: { text: 'x', images: [{ storageId: photo, url: 'u' }] }, state: 'pending', createdAt: Date.now() });
+  const b = await s.ctx.db.insert('commands', { runnerId: LAPTOP, kind: 'create', args: { text: 'y', images: [{ storageId: photo, url: 'u' }] }, state: 'pending', createdAt: Date.now() });
   await unmigrated(s);
   await migrate(s);
   assert.deepEqual(s.rows('devices').map((d) => d.apnsToken), [apns(7)]);
@@ -595,7 +604,7 @@ test('the migration deletes registrations with no real APNs token, and records f
   assert.equal(s.hasFile(photo), false);
   // Only once.
   s.scheduled.length = 0;
-  await call(s.ctx, sync.heartbeat, { key: OWNER, runner: { runnerId: M5, name: 'm5', version: 'v', startedAt: 'x', draining: false, threadCount: 1 } });
+  await call(s.ctx, sync.heartbeat, { key: OWNER, runner: { runnerId: LAPTOP, name: 'laptop', version: 'v', startedAt: 'x', draining: false, threadCount: 1 } });
   assert.ok(!s.scheduled.some((x: any) => /limitsMigration/.test(x.fn)));
 });
 
@@ -608,9 +617,10 @@ test("taking over other tokens' registrations still keeps a token to five", asyn
 
 test('a command taken and never finished expires too', async () => {
   const s = await setup();
-  const commandId = await call(s.ctx, phone.create, { token: TOKEN, text: 'x', runnerId: BRUCE });
-  await call(s.ctx, sync.takeCommand, { key: BRUCE_KEY, commandId });
-  await later(15 * DAY, () => pruneFilesUntilDone(s));
+  const commandId = await call(s.ctx, phone.create, { token: TOKEN, text: 'x', runnerId: MINI });
+  await call(s.ctx, sync.takeCommand, { key: MINI_KEY, commandId });
+  // Its lease lapses it long before (lapseCommands, or its timer).
+  await later(15 * DAY, () => call(s.ctx, sync.lapseCommands, {}));
   assert.equal((await s.ctx.db.get(commandId))?.state, 'failed');
 });
 
@@ -632,30 +642,30 @@ async function drain(s: S, name: string, fn: any): Promise<number> {
 
 test("taking over a big runner-key thread waits for its rows to go, and nobody writes under it meanwhile", async () => {
   const s = await setup();
-  await call(s.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [thread('B', BRUCE)] });
-  for (let seq = 1; seq <= 600; seq++) await call(s.ctx, sync.appendMessages, { key: BRUCE_KEY, messages: [{ threadId: 'B', seq, role: 'assistant', text: `bruce ${seq} ` + 'b'.repeat(9_000), at: 'now' }] });
-  const pic = await runnerUpload(s, 'bruce-pic');
-  await call(s.ctx, sync.addReplyImage, { key: BRUCE_KEY, threadId: 'B', seq: 600, path: 'a.png', storageId: pic, mediaType: 'image/png' });
-  await s.ctx.db.insert('eventBodies', { threadId: 'B', seq: 3, runnerId: BRUCE, text: 'tool output', at: Date.now() });
-  const takeover = () => call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('B', M5)] });
+  await call(s.ctx, sync.upsertThreads, { key: MINI_KEY, threads: [thread('B', MINI)] });
+  for (let seq = 1; seq <= 600; seq++) await call(s.ctx, sync.appendMessages, { key: MINI_KEY, messages: [{ threadId: 'B', seq, role: 'assistant', text: `mac-mini ${seq} ` + 'b'.repeat(9_000), at: 'now' }] });
+  const pic = await runnerUpload(s, 'mac-mini-pic');
+  await call(s.ctx, sync.addReplyImage, { key: MINI_KEY, threadId: 'B', seq: 600, path: 'a.png', storageId: pic, mediaType: 'image/png' });
+  await s.ctx.db.insert('eventBodies', { threadId: 'B', seq: 3, runnerId: MINI, text: 'tool output', at: Date.now() });
+  const takeover = () => call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('B', LAPTOP)] });
   s.resetReads();
   const first = await takeover();
   assert.ok(s.bytesRead() < READ_LIMIT);
   assert.deepEqual(first.skipped, ['B'], 'waits');
-  assert.equal((await s.ctx.db.query('threads').withIndex('by_threadId', (q: any) => q.eq('threadId', 'B')).unique()).runnerId, BRUCE, "still Bruce's meanwhile");
-  // Meanwhile: the owner's messages wait (skipped, sent again), Bruce's go nowhere.
+  assert.equal((await s.ctx.db.query('threads').withIndex('by_threadId', (q: any) => q.eq('threadId', 'B')).unique()).runnerId, MINI, "still Mac mini's meanwhile");
+  // Meanwhile: the owner's messages wait (skipped, sent again), Mac mini's go nowhere.
   const owner = await call(s.ctx, sync.appendMessages, { key: OWNER, messages: [1, 2, 601].map((seq) => ({ threadId: 'B', seq, role: 'user', text: `owner ${seq}`, at: 'now' })) });
   assert.deepEqual(owner.skipped, ['B:1', 'B:2', 'B:601']);
-  await call(s.ctx, sync.appendMessages, { key: BRUCE_KEY, messages: [{ threadId: 'B', seq: 700, role: 'assistant', text: 'late bruce', at: 'now' }] });
-  assert.deepEqual((await call(s.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [thread('B', BRUCE)] })).skipped, ['B']);
+  await call(s.ctx, sync.appendMessages, { key: MINI_KEY, messages: [{ threadId: 'B', seq: 700, role: 'assistant', text: 'late mac-mini', at: 'now' }] });
+  assert.deepEqual((await call(s.ctx, sync.upsertThreads, { key: MINI_KEY, threads: [thread('B', MINI)] })).skipped, ['B']);
   assert.ok((await drain(s, 'dropThreadRows', sync.dropThreadRows)) >= 1);
   assert.equal(s.rows('messages').filter((m) => m.threadId === 'B').length, 0);
   assert.equal(s.rows('eventBodies').length, 0);
   assert.equal(s.hasFile(pic), false);
-  // Still Bruce's to nobody until the owner's next write of it, which goes through.
-  await call(s.ctx, sync.appendMessages, { key: BRUCE_KEY, messages: [{ threadId: 'B', seq: 800, role: 'assistant', text: 'later bruce', at: 'now' }] });
+  // Still Mac mini's to nobody until the owner's next write of it, which goes through.
+  await call(s.ctx, sync.appendMessages, { key: MINI_KEY, messages: [{ threadId: 'B', seq: 800, role: 'assistant', text: 'later mac-mini', at: 'now' }] });
   assert.deepEqual((await takeover()).skipped, []);
-  assert.equal(s.rows('threads').find((t) => t.threadId === 'B')!.runnerId, M5);
+  assert.equal(s.rows('threads').find((t) => t.threadId === 'B')!.runnerId, LAPTOP);
   assert.deepEqual((await call(s.ctx, sync.appendMessages, { key: OWNER, messages: [{ threadId: 'B', seq: 1, role: 'user', text: 'owner 1', at: 'now' }] })).skipped, []);
   assert.deepEqual(s.rows('messages').filter((m) => m.threadId === 'B').map((m) => m.text), ['owner 1']);
   assert.equal(s.rows('threadClears').length, 0);
@@ -663,22 +673,98 @@ test("taking over a big runner-key thread waits for its rows to go, and nobody w
 
 test("a removed thread's id stays closed until its rows have gone, so a thread made under it starts clean", async () => {
   const s = await setup();
-  await call(s.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [thread('R', BRUCE)] });
-  for (let seq = 1; seq <= 600; seq++) await call(s.ctx, sync.appendMessages, { key: BRUCE_KEY, messages: [{ threadId: 'R', seq, role: 'assistant', text: 'r'.repeat(9_000), at: 'now' }] });
-  await call(s.ctx, sync.removeThreads, { key: BRUCE_KEY, threadIds: ['R'] });
-  assert.deepEqual((await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('R', M5)] })).skipped, ['R']);
+  await call(s.ctx, sync.upsertThreads, { key: MINI_KEY, threads: [thread('R', MINI)] });
+  for (let seq = 1; seq <= 600; seq++) await call(s.ctx, sync.appendMessages, { key: MINI_KEY, messages: [{ threadId: 'R', seq, role: 'assistant', text: 'r'.repeat(9_000), at: 'now' }] });
+  await call(s.ctx, sync.removeThreads, { key: MINI_KEY, threadIds: ['R'] });
+  assert.deepEqual((await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('R', LAPTOP)] })).skipped, ['R']);
   await drain(s, 'dropThreadRows', sync.dropThreadRows);
-  assert.deepEqual((await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('R', M5)] })).skipped, []);
+  assert.deepEqual((await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('R', LAPTOP)] })).skipped, []);
   assert.equal(s.rows('messages').filter((m) => m.threadId === 'R').length, 0);
+});
+
+// The clear's own timer (clearMachine.ts): a run of a thread's rows that
+// threw, or was lost, left the id closed for good before it, and every
+// write under the id was skipped from then on.
+test("a removed thread's clear whose run threw starts again by itself, and the id opens", async () => {
+  const s = await setup();
+  const machinesModule = load('machines');
+  await call(s.ctx, sync.upsertThreads, { key: MINI_KEY, threads: [thread('X', MINI)] });
+  for (let seq = 1; seq <= 600; seq++) await call(s.ctx, sync.appendMessages, { key: MINI_KEY, messages: [{ threadId: 'X', seq, role: 'assistant', text: 'x'.repeat(9_000), at: 'now' }] });
+  await call(s.ctx, sync.removeThreads, { key: MINI_KEY, threadIds: ['X'] });
+  // Its first run is lost (it threw: Convex doesn't run it again).
+  s.scheduled.splice(s.scheduled.findIndex((x: any) => /dropThreadRows/.test(x.fn)), 1);
+  assert.equal(s.rows('threadClears')[0].clearState.kind, 'clearing');
+  assert.deepEqual((await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('X', LAPTOP)] })).skipped, ['X'], 'closed');
+  // Ten minutes on, the clear's timer starts its runs again.
+  const timer = s.pendingTimers().find((t: any) => t.args.event === 'STALLED')!;
+  assert.ok(timer, 'a timer is waiting');
+  const realNow = Date.now;
+  Date.now = () => timer.at + 1;
+  try {
+    await call(s.ctx, machinesModule.deliver, timer.args);
+  } finally {
+    Date.now = realNow;
+  }
+  s.timerRan(timer.id);
+  assert.ok((await drain(s, 'dropThreadRows', sync.dropThreadRows)) >= 1);
+  assert.equal(s.rows('threadClears').length, 0, 'the id opens');
+  assert.equal(s.rows('messages').filter((m) => m.threadId === 'X').length, 0);
+  assert.deepEqual((await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('X', LAPTOP)] })).skipped, []);
+  // And no timer is left behind.
+  assert.deepEqual(s.pendingTimers().filter((t: any) => t.args.machine === 'clear'), []);
+});
+
+test('the backfill brings clears from before their machine over, and the sweep arms a stalled one', async () => {
+  const s = await setup();
+  const migrations = load('migrations');
+  await s.ctx.db.insert('threadClears', { threadId: 'OLD1', runnerId: MINI, clearState: undefined });
+  await s.ctx.db.insert('threadClears', { threadId: 'OLD2', runnerId: MINI, moving: true, done: true, clearState: undefined });
+  while (!(await call(s.ctx, migrations.run, { name: 'clearState' })).done);
+  const kinds = Object.fromEntries(s.rows('threadClears').map((c) => [c.threadId, c.clearState.kind]));
+  assert.deepEqual(kinds, { OLD1: 'clearing', OLD2: 'awaitingOwner' });
+  await call(s.ctx, sync.armClears, {});
+  await call(s.ctx, sync.armClears, {});
+  assert.deepEqual(s.pendingTimers().map((t: any) => t.args.event), ['STALLED'], 'armed once, for the clearing one');
+  // Past a hundred armed ones that keep failing, a later one still gets its timer.
+  // Past a page of them, a run reads one page and the next goes on from there.
+  for (let i = 0; i < 301; i++) await s.ctx.db.insert('threadClears', { threadId: `MANY${i}`, runnerId: MINI, clearState: { kind: 'clearing', moving: false, retryAt: Date.now() }, clearStateTimers: [] });
+  for (let i = 0; i < 4; i++) await call(s.ctx, sync.armClears, {});
+  assert.equal(s.pendingTimers().length, 302, 'every clearing row armed');
+});
+
+// Codex's review: while the deploy's stepping stone has the clear machine
+// off, a batch with one thread that needs a clear still goes through, the
+// way it did before the machine, and the clear's row has its clearState
+// (the release's schema needs it once the stone is done).
+test('during the stepping stone a removal needing a clear goes through with the rest of its batch', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tb-stepping-'));
+  try {
+    const convex = path.join(import.meta.dirname, '../../../convex');
+    for (const f of fs.readdirSync(convex)) if (f.endsWith('.ts')) fs.copyFileSync(path.join(convex, f), path.join(root, f));
+    const stepping = path.join(root, 'stepping.ts');
+    fs.writeFileSync(stepping, fs.readFileSync(stepping, 'utf8').replace('export const STEPPING: readonly string[] = [];', "export const STEPPING: readonly string[] = ['clearState'];"));
+    const s = await setup(root);
+    const syncAt = load('sync', root);
+    await call(s.ctx, syncAt.upsertThreads, { key: MINI_KEY, threads: [thread('BIG', MINI), thread('SMALL', MINI)] });
+    for (let seq = 1; seq <= 600; seq++) await call(s.ctx, syncAt.appendMessages, { key: MINI_KEY, messages: [{ threadId: 'BIG', seq, role: 'assistant', text: 'b'.repeat(9_000), at: 'now' }] });
+    await call(s.ctx, syncAt.removeThreads, { key: MINI_KEY, threadIds: ['BIG', 'SMALL'] });
+    assert.deepEqual(s.rows('threads').map((t) => t.threadId), [], 'both removed');
+    assert.equal(s.rows('threadClears')[0].clearState.kind, 'clearing');
+    assert.ok((await drain(s, 'dropThreadRows', syncAt.dropThreadRows)) >= 1);
+    assert.equal(s.rows('threadClears').length, 0, 'the id opens');
+    assert.equal(s.rows('messages').filter((m) => m.threadId === 'BIG').length, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('removing many threads with big tool output together stays under the read limit', async () => {
   const s = await setup();
   const ids = Array.from({ length: 40 }, (_, i) => `E${i}`);
-  await call(s.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: ids.map((id) => thread(id, BRUCE)) });
-  for (const id of ids) await s.ctx.db.insert('eventBodies', { threadId: id, seq: 1, runnerId: BRUCE, text: 'x'.repeat(500 * 1024), at: Date.now() });
+  await call(s.ctx, sync.upsertThreads, { key: MINI_KEY, threads: ids.map((id) => thread(id, MINI)) });
+  for (const id of ids) await s.ctx.db.insert('eventBodies', { threadId: id, seq: 1, runnerId: MINI, text: 'x'.repeat(500 * 1024), at: Date.now() });
   s.resetReads();
-  await call(s.ctx, sync.removeThreads, { key: BRUCE_KEY, threadIds: ids });
+  await call(s.ctx, sync.removeThreads, { key: MINI_KEY, threadIds: ids });
   assert.ok(s.bytesRead() < READ_LIMIT, `remove read ${s.bytesRead()}`);
   await drain(s, 'dropThreadRows', sync.dropThreadRows);
   assert.equal(s.rows('eventBodies').length, 0);
@@ -687,9 +773,9 @@ test('removing many threads with big tool output together stays under the read l
 test('before the migration, checking many photos shares one allowance for old commands', async () => {
   const s = await setup();
   await unmigrated(s);
-  for (let i = 0; i < 3; i++) await s.ctx.db.insert('commands', { runnerId: BRUCE, kind: 'create', args: { text: 'w'.repeat(1000 * 1024) }, state: 'pending', createdAt: Date.now() });
+  for (let i = 0; i < 3; i++) await s.ctx.db.insert('commands', { runnerId: MINI, kind: 'create', args: { text: 'w'.repeat(1000 * 1024) }, state: 'pending', createdAt: Date.now() });
   const photos = Array.from({ length: 6 }, (_, i) => ({ storageId: s.file(`p${i}`), url: 'u' }));
-  const c = await s.ctx.db.insert('commands', { runnerId: M5, kind: 'create', args: { text: 'x', images: photos }, state: 'pending', createdAt: Date.now() });
+  const c = await s.ctx.db.insert('commands', { runnerId: LAPTOP, kind: 'create', args: { text: 'x', images: photos }, state: 'pending', createdAt: Date.now() });
   await call(s.ctx, sync.takeCommand, { key: OWNER, commandId: c });
   s.resetReads();
   await call(s.ctx, sync.finishCommand, { key: OWNER, commandId: c, ok: true });
@@ -709,8 +795,8 @@ test('before the migration, a photo two old commands share stays until both are 
   const s = await setup();
   await unmigrated(s);
   const photo = s.file('old-photo');
-  const a = await s.ctx.db.insert('commands', { runnerId: M5, kind: 'create', args: { text: 'x', images: [{ storageId: photo, url: 'u' }] }, state: 'pending', createdAt: Date.now() });
-  await s.ctx.db.insert('commands', { runnerId: M5, kind: 'create', args: { text: 'y', images: [{ storageId: photo, url: 'u' }] }, state: 'pending', createdAt: Date.now() });
+  const a = await s.ctx.db.insert('commands', { runnerId: LAPTOP, kind: 'create', args: { text: 'x', images: [{ storageId: photo, url: 'u' }] }, state: 'pending', createdAt: Date.now() });
+  await s.ctx.db.insert('commands', { runnerId: LAPTOP, kind: 'create', args: { text: 'y', images: [{ storageId: photo, url: 'u' }] }, state: 'pending', createdAt: Date.now() });
   await call(s.ctx, sync.takeCommand, { key: OWNER, commandId: a });
   await call(s.ctx, sync.finishCommand, { key: OWNER, commandId: a, ok: true });
   assert.equal(s.hasFile(photo), true);
@@ -719,7 +805,7 @@ test('before the migration, a photo two old commands share stays until both are 
 test('clearing threads before the migration charges for big old rows its checks read', async () => {
   const s = await setup();
   await unmigrated(s);
-  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('O', M5), thread('P', M5)] });
+  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('O', LAPTOP), thread('P', LAPTOP)] });
   for (let i = 0; i < 20; i++) {
     const f = s.file(`f${i}`);
     await s.ctx.db.insert('shareImages', { threadId: 'O', seq: i, path: 'p', storageId: f, mediaType: 'image/png' });
@@ -734,7 +820,7 @@ test('clearing threads before the migration charges for big old rows its checks 
   const s2 = await setup();
   await unmigrated(s2);
   const ids = Array.from({ length: 40 }, (_, i) => `T${i}`);
-  await call(s2.ctx, sync.upsertThreads, { key: OWNER, threads: ids.map((id) => thread(id, M5)) });
+  await call(s2.ctx, sync.upsertThreads, { key: OWNER, threads: ids.map((id) => thread(id, LAPTOP)) });
   for (const id of ids) await s2.ctx.db.insert('heldPictures', { threadId: id, seq: 1, index: 0, storageId: s2.file(`h${id}`), mediaType: 'x'.repeat(512 * 1024), at: Date.now() });
   s2.resetReads();
   await call(s2.ctx, sync.removeThreads, { key: OWNER, threadIds: ids });
@@ -745,7 +831,7 @@ test('clearing threads before the migration charges for big old rows its checks 
 
 test('a text page past big tool rows stops at a few MB and says there is more', async () => {
   const s = await setup();
-  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('T', M5)] });
+  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('T', LAPTOP)] });
   await s.ctx.db.insert('messages', { threadId: 'T', seq: 1, role: 'assistant', text: 'old text', at: 'now' });
   for (let seq = 2; seq <= 1801; seq++) await s.ctx.db.insert('messages', { threadId: 'T', seq, role: 'tool', text: 't'.repeat(10_000), at: 'now' });
   s.resetReads();
@@ -766,12 +852,12 @@ test('a text page past big tool rows stops at a few MB and says there is more', 
 
 test("removing a runner key's thread gives back exactly the message bytes it was charged", async () => {
   const s = await setup();
-  await call(s.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [thread('KEEP', BRUCE), thread('SCRATCH', BRUCE)] });
-  await call(s.ctx, sync.appendMessages, { key: BRUCE_KEY, messages: [{ threadId: 'KEEP', seq: 1, role: 'assistant', text: 'k', at: 'now' }] });
-  const used = () => s.rows('runnerStorage').find((r) => r.runnerId === BRUCE)!.messageBytes;
+  await call(s.ctx, sync.upsertThreads, { key: MINI_KEY, threads: [thread('KEEP', MINI), thread('SCRATCH', MINI)] });
+  await call(s.ctx, sync.appendMessages, { key: MINI_KEY, messages: [{ threadId: 'KEEP', seq: 1, role: 'assistant', text: 'k', at: 'now' }] });
+  const used = () => s.rows('runnerStorage').find((r) => r.runnerId === MINI)!.messageBytes;
   const base = used();
-  for (let seq = 1; seq <= 200; seq++) await call(s.ctx, sync.appendMessages, { key: BRUCE_KEY, messages: [{ threadId: 'SCRATCH', seq, role: 'assistant', text: 's', at: 'now' }] });
-  await call(s.ctx, sync.removeThreads, { key: BRUCE_KEY, threadIds: ['SCRATCH'] });
+  for (let seq = 1; seq <= 200; seq++) await call(s.ctx, sync.appendMessages, { key: MINI_KEY, messages: [{ threadId: 'SCRATCH', seq, role: 'assistant', text: 's', at: 'now' }] });
+  await call(s.ctx, sync.removeThreads, { key: MINI_KEY, threadIds: ['SCRATCH'] });
   assert.equal(used(), base);
 });
 
@@ -788,7 +874,7 @@ test('the migration trims a legacy flood of real-looking registrations to five a
 
 test('past the picture cap a page gets the newest pictures', async () => {
   const s = await setup();
-  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('T', M5)] });
+  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('T', LAPTOP)] });
   for (let seq = 1; seq <= 400; seq++) await s.ctx.db.insert('replyImages', { threadId: 'T', seq, path: `r${seq}`, storageId: s.file(`r${seq}`), mediaType: 'image/png' });
   const pics = await call(s.ctx, phone.images, { token: TOKEN, threadId: 'T', from: 0 });
   assert.equal(pics.length, 300);
@@ -800,23 +886,23 @@ test('past the picture cap a page gets the newest pictures', async () => {
 test('removing a thread while a takeover waits opens its id once the rows have gone', async () => {
   for (const when of ['before the rows have gone', 'after']) {
     const s = await setup();
-    await call(s.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [thread('B', BRUCE)] });
-    for (let seq = 1; seq <= 600; seq++) await call(s.ctx, sync.appendMessages, { key: BRUCE_KEY, messages: [{ threadId: 'B', seq, role: 'assistant', text: 'b'.repeat(9_000), at: 'now' }] });
-    assert.deepEqual((await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('B', M5)] })).skipped, ['B']);
+    await call(s.ctx, sync.upsertThreads, { key: MINI_KEY, threads: [thread('B', MINI)] });
+    for (let seq = 1; seq <= 600; seq++) await call(s.ctx, sync.appendMessages, { key: MINI_KEY, messages: [{ threadId: 'B', seq, role: 'assistant', text: 'b'.repeat(9_000), at: 'now' }] });
+    assert.deepEqual((await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('B', LAPTOP)] })).skipped, ['B']);
     if (when === 'after') await drain(s, 'dropThreadRows', sync.dropThreadRows);
     await call(s.ctx, sync.removeThreads, { key: OWNER, threadIds: ['B'] });
     await drain(s, 'dropThreadRows', sync.dropThreadRows);
     assert.equal(s.rows('threadClears').length, 0, when);
-    assert.deepEqual((await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('B', M5)] })).skipped, [], when);
+    assert.deepEqual((await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('B', LAPTOP)] })).skipped, [], when);
     assert.equal(s.rows('messages').filter((m) => m.threadId === 'B').length, 0);
   }
 });
 
 test("under a closed id the owner hears to try again, its picture is answered later, and a runner key isn't told to retry", async () => {
   const s = await setup();
-  await call(s.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [thread('B', BRUCE)] });
-  for (let seq = 1; seq <= 600; seq++) await call(s.ctx, sync.appendMessages, { key: BRUCE_KEY, messages: [{ threadId: 'B', seq, role: 'assistant', text: 'b'.repeat(9_000), at: 'now' }] });
-  assert.deepEqual((await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('B', M5)] })).closed, ['B']);
+  await call(s.ctx, sync.upsertThreads, { key: MINI_KEY, threads: [thread('B', MINI)] });
+  for (let seq = 1; seq <= 600; seq++) await call(s.ctx, sync.appendMessages, { key: MINI_KEY, messages: [{ threadId: 'B', seq, role: 'assistant', text: 'b'.repeat(9_000), at: 'now' }] });
+  assert.deepEqual((await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('B', LAPTOP)] })).closed, ['B']);
   const m = await call(s.ctx, sync.appendMessages, { key: OWNER, messages: [{ threadId: 'B', seq: 601, role: 'user', text: 'x', at: 'now' }] });
   assert.deepEqual(m.closed, ['B']);
   const b = await call(s.ctx, sync.appendBodies, { key: OWNER, bodies: [{ threadId: 'B', seq: 601, text: 'x' }] });
@@ -828,16 +914,97 @@ test("under a closed id the owner hears to try again, its picture is answered la
   const pic = s.file('owner-pic');
   assert.deepEqual(await call(s.ctx, sync.addReplyImage, { key: OWNER, threadId: 'B', seq: 601, path: 'a.png', storageId: pic, mediaType: 'image/png' }), { later: true });
   assert.equal(s.hasFile(pic), false, 'its upload goes; the runner uploads again');
-  assert.equal((await call(s.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [thread('B', BRUCE)] })).closed, undefined);
+  assert.equal((await call(s.ctx, sync.upsertThreads, { key: MINI_KEY, threads: [thread('B', MINI)] })).closed, undefined);
 });
 
 test('before the migration, checks past the old-command allowance read no more commands', async () => {
   const s = await setup();
   await unmigrated(s);
-  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('O', M5)] });
-  await s.ctx.db.insert('commands', { runnerId: BRUCE, kind: 'create', args: { text: 'w'.repeat(900 * 1024) }, state: 'pending', createdAt: Date.now() });
+  await call(s.ctx, sync.upsertThreads, { key: OWNER, threads: [thread('O', LAPTOP)] });
+  await s.ctx.db.insert('commands', { runnerId: MINI, kind: 'create', args: { text: 'w'.repeat(900 * 1024) }, state: 'pending', createdAt: Date.now() });
   for (let i = 0; i < 30; i++) await s.ctx.db.insert('shareImages', { threadId: 'O', seq: i, path: `p${i}`, storageId: s.file(`f${i}`), mediaType: 'image/png' });
   s.resetReads();
   await call(s.ctx, sync.dropShareImages, { key: OWNER, threadId: 'O' });
   assert.ok(s.bytesRead() < READ_LIMIT, `read ${s.bytesRead()}`);
+});
+
+// API 91: a following runner's failed update reaches the main key only, cut
+// to fit, and a heartbeat without it clears it (fix-update.ts).
+test('a runner key\'s updateFailed is cut to fit, read by the main key only, and gone once it stops sending it', async () => {
+  const s = await setup();
+  const runner = { runnerId: MINI, name: 'mac-mini', version: 'v', startedAt: '2026-11-19T00:00:00Z', draining: false, threadCount: 1 };
+  const updateFailed = { kind: 'build' as const, commit: 'a'.repeat(40), subject: 's', error: 'x'.repeat(10_000), logFile: '/tmp/update.log' };
+  await call(s.ctx, sync.heartbeat, { key: MINI_KEY, runner: { ...runner, updateFailed } });
+  const rows = (await call(s.ctx, sync.otherRunnersList, { key: OWNER, runnerId: LAPTOP })) as { runnerId: string; updateFailed?: typeof updateFailed }[];
+  const mini = rows.find((r) => r.runnerId === MINI);
+  assert.equal(mini?.updateFailed?.commit, updateFailed.commit);
+  assert.ok(Buffer.byteLength(mini!.updateFailed!.error) <= 2400);
+  assert.notEqual(await outcome(call(s.ctx, sync.otherRunnersList, { key: MINI_KEY, runnerId: MINI })), 'ok');
+  await call(s.ctx, sync.heartbeat, { key: MINI_KEY, runner });
+  const after = (await call(s.ctx, sync.otherRunnersList, { key: OWNER, runnerId: LAPTOP })) as { runnerId: string; updateFailed?: unknown }[];
+  assert.equal(after.find((r) => r.runnerId === MINI)?.updateFailed, undefined);
+});
+
+test('an F-Droid phone registers its UnifiedPush endpoint and keys (API 93), and only a public https one', async () => {
+  const s = await setup();
+  const p256dh = 'BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4';
+  const auth = 'BTBZMqHH6r4Tts7J_aSIgg';
+  const endpoint = 'https://ntfy.sh/upAbCdEf123?up=1';
+  await call(s.ctx, phone.registerDevice, { token: TOKEN, apnsToken: endpoint, environment: 'production', platform: 'webpush', webPush: { p256dh, auth }, pushKey: 'A'.repeat(43) + '=' });
+  const targets = await call(s.ctx, devices.targets, {});
+  assert.deepEqual(targets.map((t: any) => [t.apnsToken, t.platform, t.webPush]), [[endpoint, 'webpush', { p256dh, auth }]]);
+  // Its notification setting is keyed on the endpoint, as an Apple token's is.
+  await call(s.ctx, phone.setNotifications, { token: TOKEN, apnsToken: endpoint, notify: 'always' });
+  assert.equal(s.rows('devices')[0].notify, 'always');
+  const reg = (apnsToken: string, webPush?: unknown, platform = 'webpush') => outcome(call(s.ctx, phone.registerDevice, { token: TOKEN, apnsToken, environment: 'production', platform, ...(webPush ? { webPush } : {}) }));
+  for (const bad of ['http://ntfy.sh/x', 'https://127.0.0.1/x', 'https://169.254.169.254/latest', 'https://localhost:8080/x', 'https://[::1]/x', 'https://10.0.0.5/up', 'https://u:p@ntfy.sh/x', 'https://ntfy.sh/' + 'x'.repeat(1100)]) {
+    assert.equal(await reg(bad, { p256dh, auth }), 'invalid', bad);
+  }
+  // Keys have to be there and the right size, and only with "webpush".
+  assert.equal(await reg(endpoint), 'invalid');
+  assert.equal(await reg(endpoint, { p256dh: p256dh.slice(1), auth }), 'invalid');
+  assert.equal(await reg(endpoint, { p256dh, auth: auth + 'A' }), 'invalid');
+  assert.equal(await reg('fXyZ1234567890abcdef:APA91bHexample_token-with-dashes_0123456789abcdefghij', { p256dh, auth }, 'android'), 'invalid');
+});
+
+test('phone:webPushKey makes one VAPID key for the deployment and hands every phone the same public half', async () => {
+  const s = await setup();
+  const actx = {
+    runQuery: (fn: unknown, args: any) => {
+      const name = String(fn);
+      if (name.endsWith('phone.phoneTokenOk')) return call(s.ctx, phone.phoneTokenOk, args);
+      if (name.endsWith('devices.vapidKey')) return call(s.ctx, devices.vapidKey, args);
+      throw new Error(`not faked: ${name}`);
+    },
+    runMutation: (fn: unknown, args: any) => {
+      if (String(fn).endsWith('devices.putVapidKey')) return call(s.ctx, devices.putVapidKey, args);
+      throw new Error(`not faked: ${String(fn)}`);
+    },
+  };
+  const one = await call(actx, phone.webPushKey, { token: TOKEN });
+  const two = await call(actx, phone.webPushKey, { token: TOKEN });
+  assert.match(one.vapid, /^[A-Za-z0-9_-]{87}$/);
+  assert.equal(Buffer.from(one.vapid, 'base64url')[0], 4);
+  assert.equal(two.vapid, one.vapid);
+  assert.equal(s.rows('webPushVapid').length, 1);
+  // The public half matches the saved private key.
+  const row = s.rows('webPushVapid')[0];
+  const pub = Buffer.concat([Buffer.from([4]), Buffer.from(row.x, 'base64url'), Buffer.from(row.y, 'base64url')]).toString('base64url');
+  assert.equal(pub, one.vapid);
+  // A bad token gets nothing.
+  assert.notEqual(await outcome(call(actx, phone.webPushKey, { token: 'nope' })), 'ok');
+});
+
+test("limitsMigration keeps Android phones' Firebase and UnifiedPush rows, which aren't hex", async () => {
+  const s = await setup();
+  await unmigrated(s);
+  const firebase = 'fXyZ1234567890abcdef:APA91bHexample_token-with-dashes_0123456789abcdefghij';
+  const endpoint = 'https://ntfy.sh/upAbCdEf123?up=1';
+  await s.ctx.db.insert('devices', { apnsToken: firebase, environment: 'production', tokenName: 'pixel', tokenId: s.tokenId, updatedAt: 1, platform: 'android' });
+  await s.ctx.db.insert('devices', { apnsToken: endpoint, environment: 'production', tokenName: 'pixel', tokenId: s.tokenId, updatedAt: 2, platform: 'webpush', webPush: { p256dh: 'B' + 'A'.repeat(86), auth: 'A'.repeat(22) } });
+  // Junk of each kind still goes.
+  await s.ctx.db.insert('devices', { apnsToken: 'https://127.0.0.1/x', environment: 'production', tokenName: 'pixel', tokenId: s.tokenId, updatedAt: 3, platform: 'webpush' });
+  await s.ctx.db.insert('devices', { apnsToken: 'has spaces', environment: 'production', tokenName: 'pixel', tokenId: s.tokenId, updatedAt: 4, platform: 'android' });
+  await migrate(s);
+  assert.deepEqual(s.rows('devices').map((d) => d.apnsToken).sort(), [endpoint, firebase].sort());
 });

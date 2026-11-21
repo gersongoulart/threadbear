@@ -4,11 +4,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { makeHarness, tick, tmpDir } from '../helpers/fakes.ts';
 import { checkSummary } from '../helpers/protocol-check.ts';
-import { Projects, drainProjectMethods, projectMethods, BRIEF_MAX, NOTES_LONG, type ProjectHost } from '../../src/projects.ts';
+import { Projects, drainProjectMethods, projectMethods, applyNoteEdits, BRIEF_MAX, NOTES_LONG, type ProjectHost } from '../../src/projects.ts';
 import { projectRouter, type PrimaryLink } from '../../src/handover.ts';
 import type { PocketCardInput, PocketCardSummary } from '../../src/sync.ts';
 import { Librarian, type LibrarianPocket, librarianMethods, saysNoFit, disclaims, mainCheckout, PICK_CHECKS_PER_LOOK, SETTLE_MS, CATCH_UP_MS, CATCH_UP_MIN_CHARS, FIRST_MESSAGE_MS, SWEEP_MS, KEYWORDS_SYSTEM } from '../../src/librarian.ts';
 import { buildThreadbearTools } from '../../src/threadbear-mcp.ts';
+import { PROJECT_STEP_NUDGE } from '../../src/needs.ts';
+import { AGENT_MESSAGE_PREFIX } from '../../src/protocol.ts';
 import { FakeClock } from '../../src/clock.ts';
 import { nullLogger, type Logger } from '../../src/log.ts';
 import { ErrorCode, RpcError } from '../../src/protocol.ts';
@@ -84,7 +86,7 @@ test("the librarian keeps why a thread is in each project, and takes it out of a
   const whys = () => h.runner.get(thread.id).projects?.map((m) => [m.title, m.why]);
   assert.deepEqual(whys(), [['Components directory', 'Mentions the directory'], ['Kept', 'Also this']]);
   checkSummary(h.runner.get(thread.id));
-  // Mike keeps one (it's pinned and its reason stays).
+  // Alex keeps one (it's pinned and its reason stays).
   projects.changeMembership(thread.id, { add: [kept.id], by: 'mike' });
   // A catch-up that only leaves it out of projects keeps it there, as before.
   answer = { projects: [cal.id], reasons: { [cal.id]: 'Shortlists photos for the calendar' } };
@@ -95,7 +97,7 @@ test("the librarian keeps why a thread is in each project, and takes it out of a
   await tick(8);
   assert.equal(librarian.status().recent[0].text, 'Put it in Calendar');
   assert.deepEqual(whys(), [['Components directory', 'Mentions the directory'], ['Kept', 'Also this'], ['Calendar', 'Shortlists photos for the calendar']]);
-  // One that says to leave it takes it out, but never out of Mike's.
+  // One that says to leave it takes it out, but never out of Alex's.
   answer = { projects: [cal.id], reasons: { [cal.id]: 'Picks photos for the calendar' }, leave: { [dir.id]: 'Not a components thread', [kept.id]: 'Nor this' } };
   h.runner.send(thread.id, 'and more photos '.repeat(40));
   await tick();
@@ -106,7 +108,7 @@ test("the librarian keeps why a thread is in each project, and takes it out of a
   assert.equal(librarian.status().recent[0].outcome, 'left');
   // The newer reason replaces the old one on its own guess.
   assert.deepEqual(whys(), [['Kept', 'Also this'], ['Calendar', 'Picks photos for the calendar']]);
-  // Not remembered as Mike's no: a later look may put it back.
+  // Not remembered as Alex's no: a later look may put it back.
   assert.equal(rec(h, thread.id).projectsLeft, undefined);
 });
 
@@ -115,22 +117,22 @@ const reply = (v: unknown): ModelResult<string> => ({ ok: true, value: JSON.stri
 
 // ------------------------------------------------------------- projects
 
-test('Mike makes a project with a thread in it: pinned, in the summary, counted, kept', () => {
+test('Alex makes a project with a thread in it: pinned, in the summary, counted, kept', () => {
   const { h, repo, projects, create } = setup();
   const app = repo('dev/app');
   const { thread } = create();
-  const p = projects.create({ title: '  Poddle ', folders: [app], goals: 'A podcast player', threadIds: [thread.id.slice(0, 8)], by: 'mike' });
+  const p = projects.create({ title: '  Pantry ', folders: [app], goals: 'A podcast player', threadIds: [thread.id.slice(0, 8)], by: 'mike' });
   assert.match(p.id, /^p_[0-9a-f]{8}$/);
-  assert.equal(p.title, 'Poddle');
+  assert.equal(p.title, 'Pantry');
   assert.equal(p.threadCount, 1);
   const s = h.runner.get(thread.id);
   assert.deepEqual(checkSummary(s), []);
-  assert.deepEqual(s.projects?.map((m) => [m.id, m.title, m.by, m.pinned]), [[p.id, 'Poddle', 'mike', true]]);
+  assert.deepEqual(s.projects?.map((m) => [m.id, m.title, m.by, m.pinned]), [[p.id, 'Pantry', 'mike', true]]);
   const sent = h.notes.filter((n) => n.method === 'projects.updated');
   assert.ok(sent.length >= 1);
   // A rename reaches the thread's summary.
-  projects.update(p.id, { title: 'Poddle app' });
-  assert.equal(h.runner.get(thread.id).projects?.[0].title, 'Poddle app');
+  projects.update(p.id, { title: 'Pantry app' });
+  assert.equal(h.runner.get(thread.id).projects?.[0].title, 'Pantry app');
   // Bad input is refused with what's wrong.
   assert.throws(() => projects.create({ title: ' ', by: 'mike' }), (e: RpcError) => e.code === -32602);
   assert.throws(() => projects.create({ title: 'x', folders: ['/nope/not/here'], by: 'mike' }), /Folder not found/);
@@ -138,7 +140,7 @@ test('Mike makes a project with a thread in it: pinned, in the summary, counted,
   // Saved: a new store reads it back.
   const again = new Projects({ home: h.home, clock: new FakeClock(), log: nullLogger });
   again.start(h.runner);
-  assert.equal(again.find('poddle app')?.id, p.id);
+  assert.equal(again.find('pantry app')?.id, p.id);
   assert.deepEqual(again.get(p.id).threadIds, [thread.id]);
 });
 
@@ -222,7 +224,7 @@ test('a thread that only shares a subject with a project stays out of it, and la
   await again(s, thread.id);
   assert.equal(s.checks.length, 1, 'refused once, not asked again');
   assert.equal(s.h.runner.get(thread.id).projects?.length ?? 0, 0);
-  // Mike asking for a look gets a fresh answer.
+  // Alex asking for a look gets a fresh answer.
   s.librarian.run(thread.id);
   await tick(8);
   assert.equal(s.checks.length, 2);
@@ -372,10 +374,10 @@ test('a look asks about a few picks at most', async () => {
 
 test('saysNoFit spots reasons that say a thread does not belong', () => {
   for (const no of ['Not that; ignore', 'Unrelated', 'No clear fit', 'none', 'Not about this project', "Doesn't fit"]) assert.ok(saysNoFit(no), no);
-  for (const yes of ['Edits the Poddle repo', 'Fixes the not-found page', 'Shortlists photos for the calendar entry', 'Notes for the Northern trip']) assert.ok(!saysNoFit(yes), yes);
+  for (const yes of ['Edits the Pantry repo', 'Fixes the not-found page', 'Shortlists photos for the calendar entry', 'Notes for the Northern trip']) assert.ok(!saysNoFit(yes), yes);
 });
 
-test('membership: the librarian never undoes Mike or an agent, and says what it did', () => {
+test('membership: the librarian never undoes Alex or an agent, and says what it did', () => {
   const { h, projects, create } = setup();
   const { thread } = create();
   const a = projects.create({ title: 'Alpha', by: 'mike' });
@@ -385,7 +387,7 @@ test('membership: the librarian never undoes Mike or an agent, and says what it 
   assert.deepEqual(r1.joined, [a.id]);
   assert.equal(r1.thread.projects?.[0].pinned, undefined);
   assert.ok(h.events(thread.id).some((e) => e.type === 'system.note' && e.text === 'Put in Alpha by the librarian.'));
-  // Mike takes it out: remembered, and the librarian can't put it back.
+  // Alex takes it out: remembered, and the librarian can't put it back.
   projects.changeMembership(thread.id, { remove: [a.id], by: 'mike' });
   assert.deepEqual(projects.changeMembership(thread.id, { add: [a.id], by: 'librarian' }).joined, []);
   assert.equal(h.runner.get(thread.id).projects, undefined);
@@ -393,7 +395,7 @@ test('membership: the librarian never undoes Mike or an agent, and says what it 
   projects.changeMembership(thread.id, { add: [b.id], by: 'agent' });
   assert.equal(h.runner.get(thread.id).projects?.[0].pinned, true);
   assert.deepEqual(projects.changeMembership(thread.id, { remove: [b.id], by: 'librarian' }).left, []);
-  // Mike putting it back in Alpha clears the "never".
+  // Alex putting it back in Alpha clears the "never".
   projects.changeMembership(thread.id, { add: [a.id], by: 'mike' });
   assert.deepEqual(h.runner.get(thread.id).projects?.map((m) => m.id), [b.id, a.id]);
   assert.equal(rec(h, thread.id)?.projectsLeft, undefined);
@@ -440,7 +442,7 @@ test('the RPC methods: list, get, create, update, setProjects, archive', () => {
 test('a session hears about a project once: a live one at its next message, a fresh one as instructions', async () => {
   const { h, repo, projects, create, finish } = setup();
   const app = repo('dev/app');
-  const p = projects.create({ title: 'Poddle', folders: [app], goals: 'A podcast player for Mike', state: 'Build 12 is in review', by: 'mike' });
+  const p = projects.create({ title: 'Pantry', folders: [app], goals: 'A podcast player for Alex', state: 'Build 12 is in review', by: 'mike' });
   const { thread } = create();
   // Not in any project when its CLI started: no brief.
   assert.equal(h.adapter.last.opts.instructions, undefined);
@@ -449,7 +451,7 @@ test('a session hears about a project once: a live one at its next message, a fr
   h.runner.send(thread.id, 'carry on');
   await tick();
   const sent = h.adapter.last.sent.at(-1)!;
-  assert.match(sent.text, /^\[Threadbear project\] This thread is now part of the project "Poddle" \(p_[0-9a-f]+\)\. Goals: A podcast player for Mike State: Build 12 is in review/);
+  assert.match(sent.text, /^\[Threadbear project\] This thread is now part of the project "Pantry" \(p_[0-9a-f]+\)\. Goals: A podcast player for Alex State: Build 12 is in review/);
   assert.match(sent.text, /\n\ncarry on$/);
   // Said once.
   await finish(thread.id);
@@ -475,20 +477,20 @@ test('a session hears about a project once: a live one at its next message, a fr
   assert.equal(h.adapter.last.opts.resume, false);
   const brief = h.adapter.last.opts.instructions!;
   assert.match(brief, /^\[Threadbear projects\]/);
-  assert.match(brief, /## Poddle \(p_[0-9a-f]+\)\nFolders: ~\/dev\/app\nGoals: A podcast player for Mike\nState: Build 12 is in review/);
+  assert.match(brief, /## Pantry \(p_[0-9a-f]+\)\nFolders: ~\/dev\/app\nGoals: A podcast player for Alex\nState: Build 12 is in review/);
   assert.doesNotMatch(h.adapter.last.sent.at(-1)!.text, /Threadbear project/);
 });
 
 test("New Thread on a project's page: the thread starts in the project, pinned, and its first session has the brief", async () => {
   const { h, repo, projects } = setup();
   const app = repo('dev/app');
-  const p = projects.create({ title: 'Poddle', folders: [app], goals: 'A podcast player for Mike', by: 'mike' });
+  const p = projects.create({ title: 'Pantry', folders: [app], goals: 'A podcast player for Alex', by: 'mike' });
   const { thread } = h.runner.create({ text: 'Start on the player', cwd: app, accountId: 'claude-3', projectIds: [p.id] });
-  assert.deepEqual(thread.projects?.map((m) => [m.title, m.pinned]), [['Poddle', true]]);
+  assert.deepEqual(thread.projects?.map((m) => [m.title, m.pinned]), [['Pantry', true]]);
   checkSummary(thread);
   assert.deepEqual(projects.get(p.id).threadIds, [thread.id]);
   await tick();
-  assert.match(h.adapter.last.opts.instructions ?? '', /## Poddle \(p_[0-9a-f]+\)\nFolders: ~\/dev\/app\nGoals: A podcast player for Mike/);
+  assert.match(h.adapter.last.opts.instructions ?? '', /## Pantry \(p_[0-9a-f]+\)\nFolders: ~\/dev\/app\nGoals: A podcast player for Alex/);
   assert.equal(h.adapter.last.sent.at(-1)!.text, 'Start on the player');
   // A project that isn't there makes no thread at all.
   const before = h.runner.list().length;
@@ -563,15 +565,15 @@ test('the librarian looks after the first turn: makes a project and files the th
       assert.equal(p.feature, 'projects');
       assert.match(p.prompt, /Projects:\n\(none yet\)/);
       assert.match(p.prompt, /Thread "Build the podcast player", in ~\/dev\/misc \(not a repo: a catch-all folder\)/);
-      assert.match(p.prompt, /Edited files in: ~\/dev\/poddle/);
+      assert.match(p.prompt, /Edited files in: ~\/dev\/pantry/);
       assert.match(p.prompt, /First message: Build the podcast player/);
-      return reply({ projects: [], new: { title: 'Poddle', folders: ['~/dev/poddle', '~/dev/misc'], goals: 'A podcast player', state: 'Just started' }, state: {}, why: 'New app work' });
+      return reply({ projects: [], new: { title: 'Pantry', folders: ['~/dev/pantry', '~/dev/misc'], goals: 'A podcast player', state: 'Just started' }, state: {}, why: 'New app work' });
     },
   });
   const { h, repo, create, finish, librarian, projects } = s;
-  const poddle = repo('dev/poddle');
+  const pantry = repo('dev/pantry');
   const { thread } = create('Build the podcast player');
-  await finish(thread.id, [path.join(poddle, 'src/app.ts')]);
+  await finish(thread.id, [path.join(pantry, 'src/app.ts')]);
   const st = librarian.status();
   assert.equal(st.state, 'idle');
   // Its first message queued a look; the turn ending before it ran makes
@@ -584,20 +586,20 @@ test('the librarian looks after the first turn: makes a project and files the th
   assert.equal(after.queue.length, 0);
   assert.equal(after.looksToday, 1);
   assert.equal(after.spentTodayUsd, 0, 'looks run on the pool, so nothing is spent');
-  assert.deepEqual(after.recent.map((e) => [e.outcome, e.text, e.reason]), [['created', 'Made Poddle and put it there', 'first-turn']]);
+  assert.deepEqual(after.recent.map((e) => [e.outcome, e.text, e.reason]), [['created', 'Made Pantry and put it there', 'first-turn']]);
   const [p] = projects.list();
   // The catch-all folder isn't a project folder.
-  assert.deepEqual(p.folders, [poddle]);
+  assert.deepEqual(p.folders, [pantry]);
   assert.equal(p.createdBy, 'librarian');
   assert.equal(p.createdByThread, thread.id);
-  assert.deepEqual(h.runner.get(thread.id).projects?.map((m) => [m.title, m.by]), [['Poddle', 'librarian']]);
+  assert.deepEqual(h.runner.get(thread.id).projects?.map((m) => [m.title, m.by]), [['Pantry', 'librarian']]);
   assert.ok(h.notes.some((n) => n.method === 'librarian.updated'));
 });
 
 test('commandFolders: where cd, pushd and git -C point, a later relative cd following an earlier one', () => {
   const home = '/Users/me';
   const cwd = '/Users/me/dev/misc';
-  assert.deepEqual(commandFolders('cd ~/dev/me/sammy-cam && npm test', cwd, home), ['/Users/me/dev/me/sammy-cam']);
+  assert.deepEqual(commandFolders('cd ~/code/garden-cam && npm test', cwd, home), ['/Users/me/code/garden-cam']);
   assert.deepEqual(commandFolders('cd "$HOME/dev/my app"; cd web && ls', cwd, home), ['/Users/me/dev/my app', '/Users/me/dev/my app/web']);
   assert.deepEqual(commandFolders('git -C ../blog log -3; pushd /tmp/x', cwd, home), ['/Users/me/dev/blog', '/tmp/x']);
   // A git -C doesn't move later relative cds.
@@ -611,31 +613,31 @@ test('commandFolders: where cd, pushd and git -C point, a later relative cd foll
 test('the librarian sees the repo a catch-all thread works in through shell commands alone', async () => {
   let answer: unknown = {};
   const s = setup({ models: (p) => {
-    assert.match(p.prompt, /Ran commands in: ~\/dev\/sammy-cam\n/);
+    assert.match(p.prompt, /Ran commands in: ~\/dev\/garden-cam\n/);
     return reply(answer);
   } });
   const { h, repo, create, finish, librarian, projects } = s;
-  const cam = repo('dev/sammy-cam');
+  const cam = repo('dev/garden-cam');
   // Its first turn: no Edit or Write, just commands in the repo (and a
   // look in the catch-all folder it's in, which isn't news).
-  answer = { projects: [], new: { title: 'Sammy Cam', folders: ['~/dev/sammy-cam'], goals: 'Watches Sammy', state: 'Fixed a false visit' } };
-  const { thread } = create('Sammy Cam saw him on the sofa when he was not');
+  answer = { projects: [], new: { title: 'Garden Cam', folders: ['~/dev/garden-cam'], goals: 'Watches Garden', state: 'Fixed a false visit' } };
+  const { thread } = create('Garden Cam saw him on the sofa when he was not');
   await finish(thread.id, [], [`cd ${cam} && npm test`, `cd ${s.misc} && ls`]);
   h.clock.advance(SETTLE_MS);
   await tick(6);
   const [p] = projects.list();
-  assert.equal(p.title, 'Sammy Cam');
+  assert.equal(p.title, 'Garden Cam');
   assert.deepEqual(p.folders, [cam]);
   // A project made without its folder gets it at the next look, and a
   // turn of commands in a repo the project lacks isn't skipped as quiet.
   projects.update(p.id, { folders: [] });
-  answer = { projects: [p.id], addFolders: { [p.id]: ['~/dev/sammy-cam'] } };
+  answer = { projects: [p.id], addFolders: { [p.id]: ['~/dev/garden-cam'] } };
   h.runner.send(thread.id, 'ok');
   await tick();
   await finish(thread.id, [], [`git -C ${cam} log -1`]);
   h.clock.advance(CATCH_UP_MS + SETTLE_MS);
   await tick(8);
-  assert.equal(librarian.status().recent[0].text, 'Added ~/dev/sammy-cam to Sammy Cam');
+  assert.equal(librarian.status().recent[0].text, 'Added ~/dev/garden-cam to Garden Cam');
   assert.deepEqual(projects.record(p.id)?.folders, [cam]);
 });
 
@@ -753,6 +755,169 @@ test('agent tools: make, read, update, join and leave projects', async () => {
   assert.equal((await call('read_project', { project: 'nope' })).error, true);
 });
 
+test('applyNoteEdits: like Edit, each old matches once, in order, all or none', () => {
+  const notes = 'Intro.\n\n- one\n- two\n- three\n\nOutro.';
+  assert.equal(applyNoteEdits(notes, [{ old: '- two', new: '- two, done' }]), 'Intro.\n\n- one\n- two, done\n- three\n\nOutro.');
+  // Several, each on the result of the ones before.
+  assert.equal(applyNoteEdits(notes, [{ old: 'Intro.', new: 'Start.' }, { old: 'Start.\n', new: 'Begin.\n' }]), 'Begin.\n\n- one\n- two\n- three\n\nOutro.');
+  // Taking out a bullet doesn't split the list; a paragraph leaves one blank line.
+  assert.equal(applyNoteEdits(notes, [{ old: '- two', new: '' }]), 'Intro.\n\n- one\n- three\n\nOutro.');
+  assert.equal(applyNoteEdits(notes, [{ old: '- one\n- two\n- three', new: '' }]), 'Intro.\n\nOutro.');
+  assert.equal(applyNoteEdits(notes, [{ old: 'Intro.', new: '' }]), '- one\n- two\n- three\n\nOutro.');
+  // An old with its own line break comes out exactly; CRLF is LF, so a \r
+  // can't hide from the reviewer's diff.
+  const doc = '## Decisions\n- Keep X\n- Drop Y\n\n## Gotchas\n- Z';
+  assert.equal(applyNoteEdits(doc, [{ old: '- Drop Y\n', new: '' }]), '## Decisions\n- Keep X\n\n## Gotchas\n- Z');
+  assert.equal(applyNoteEdits('## A\n\n- Drop\n- Keep', [{ old: '\n- Drop', new: '' }]), '## A\n\n- Keep');
+  assert.equal(applyNoteEdits('- a\r\n- b\r\n- c', [{ old: '- b', new: '' }]), '- a\n- c');
+  assert.equal(applyNoteEdits('a\nb', [{ old: 'a\r\nb', new: 'a\rb, c' }]), 'a\nb, c');
+  assert.throws(() => applyNoteEdits('x'.repeat(49_990) + ' END', [{ old: 'END', new: 'y'.repeat(100) }]), /past the 50000/);
+  // The size is of the notes as saved: trimmed, with the paragraph on the end (Codex and Gemini, round two).
+  assert.equal(applyNoteEdits('x'.repeat(49_999) + 'a', [{ old: 'a', new: 'b\n' }]).length, 50_000);
+  assert.throws(() => applyNoteEdits('A' + 'x'.repeat(49_989), [{ old: 'A', new: 'B' }], '0123456789'), /past the 50000/);
+  // A long run of line breaks before a removal is linear work.
+  const t0 = Date.now();
+  applyNoteEdits('MARKER DELETE', [{ old: 'MARKER', new: 'A' + '\n'.repeat(45_000) + 'B' }, { old: 'DELETE', new: '' }]);
+  assert.ok(Date.now() - t0 < 1000);
+  const fails = (edits: unknown, re: RegExp) => assert.throws(() => applyNoteEdits(notes, edits), (e: any) => e instanceof RpcError && re.test(e.message));
+  fails([{ old: '- four', new: 'x' }], /old isn't in the notes, so nothing changed/);
+  fails([{ old: '- t', new: 'x' }], /more than once/);
+  fails([{ old: '- one', new: 'x' }, { old: '- one', new: 'y' }], /editNotes\[1\]'s old isn't in the notes \(after the edits before it\)/);
+  fails([{ old: '', new: 'x' }], /old is empty/);
+  fails([{ old: 'Intro.', new: 'Intro.' }], /the same/);
+  fails([], /must be a list/);
+  fails([{ old: 'Intro.' }], /both text/);
+});
+
+test('update_project editNotes: changes one line in place, refuses what doesn\'t match, and goes with appendNote', async () => {
+  const { h, projects, create } = setup();
+  const { thread } = create();
+  const tools = buildThreadbearTools(h.runner, thread.id, Date.now, undefined, projects);
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const t = tools.find((x) => x.name === name)!;
+    const r = await t.handler(args as never, {} as never);
+    return { text: r.content.map((c: any) => c.text).join(''), error: Boolean(r.isError) };
+  };
+  const p = projects.create({ title: 'App', notes: 'Decided: npm.\n\n- Open: pick a host\n- Owed: docs', by: 'mike' });
+  assert.deepEqual(await call('update_project', { project: p.id, editNotes: [{ old: '- Open: pick a host', new: '- Host: Fly, picked 20 Nov' }] }), { text: `Updated "App" (${p.id}).`, error: false });
+  assert.equal(projects.list()[0].notes, 'Decided: npm.\n\n- Host: Fly, picked 20 Nov\n- Owed: docs');
+  const miss = await call('update_project', { project: p.id, editNotes: [{ old: '- Owed: docs', new: '' }, { old: 'nowhere', new: 'x' }], state: 'Moving' });
+  assert.equal(miss.error, true);
+  assert.match(miss.text, /editNotes\[1\]'s old isn't in the notes/);
+  assert.equal(projects.list()[0].notes, 'Decided: npm.\n\n- Host: Fly, picked 20 Nov\n- Owed: docs', 'all or none');
+  assert.equal(projects.list()[0].state, '', 'and nothing else changed');
+  assert.equal((await call('update_project', { project: p.id, notes: 'x', editNotes: [{ old: 'a', new: 'b' }] })).error, true);
+  assert.equal((await call('update_project', { project: p.id, editNotes: [{ old: '- Owed: docs', new: '' }], appendNote: 'Gotcha: tags.' })).error, false);
+  assert.equal(projects.list()[0].notes, 'Decided: npm.\n\n- Host: Fly, picked 20 Nov\n\nGotcha: tags.');
+  // One step where the notes live: the notes judged, or nothing.
+  assert.throws(() => projects.editNotes(p.id, [{ old: 'Decided: npm.', new: 'Decided: pnpm.' }], { ifNotes: 'what the card showed', state: 'x' }), /changed while this waited/);
+  assert.equal(projects.list()[0].state, '');
+  const done = projects.editNotes(p.id, [{ old: 'Decided: npm.', new: 'Decided: pnpm.' }], { ifNotes: projects.list()[0].notes, state: 'Moving', appendNote: 'Last.' });
+  assert.equal(done.notes, 'Decided: pnpm.\n\n- Host: Fly, picked 20 Nov\n\nGotcha: tags.\n\nLast.');
+  assert.equal(done.state, 'Moving');
+});
+
+// 20 Nov 2026: the calendar site's thread said Done with its project's state
+// naming a next step for Mike and earlier follow-ups never answered.
+test("end_turn: a Done card in a project still going is told once of the project's state and earlier items nobody answered", async () => {
+  const { h, repo, projects, create } = setup();
+  const app = repo('dev/cal');
+  const { thread } = create();
+  const tools = buildThreadbearTools(h.runner, thread.id, Date.now, undefined, projects, undefined, { oneReply: () => true, plainCardNote: false, tryFirstNote: false, sleep: async () => {} });
+  const tool = (name: string) => tools.find((x) => x.name === name)!;
+  await tool('create_project').handler({ title: 'Calendar', folders: [app], goals: 'Voting site', state: "Live. Next is Peter's review of the live site." } as never, {} as never);
+  let s = h.adapter.sessions.filter((x) => x.opts.threadId === thread.id).at(-1)!;
+  s.init();
+  let n = 0;
+  const endTurn = async (input: Record<string, unknown>) => {
+    const itemId = `e${++n}`;
+    s.out({ kind: 'event', event: { type: 'tool.call', itemId, name: 'mcp__threadbear__end_turn', kind: 'mcp', title: 'end_turn', input } });
+    const r = (await tool('end_turn').handler(input as never, {} as never)) as { content: { text: string }[]; isError?: boolean };
+    const text = r.content.map((c) => c.text).join('');
+    // The CLI may have been resumed while the call ran (a card answer does that).
+    s = h.adapter.sessions.filter((x) => x.opts.threadId === thread.id).at(-1)!;
+    s.out({ kind: 'event', event: { type: 'tool.result', itemId, ok: !r.isError, text, truncated: false, images: [] } });
+    return { text, error: Boolean(r.isError) };
+  };
+  // An earlier turn's card: three follow-ups, then a question, each refused once first.
+  s.text('m1', 'Google sign-in works.');
+  let r = await endTurn({ needs: 'nothing', next: ['Draft an email telling Peter the site is ready', 'Load the rest of Peter\'s photos once he sends them', 'Make Google\'s sign-in screen name the calendar site'] });
+  assert.ok(r.text.startsWith(PROJECT_STEP_NUDGE), r.text);
+  assert.match(r.text, /"Calendar" \(its state: "Live\. Next is Peter's review of the live site\."\)/);
+  r = await endTurn({ needs: 'nothing', next: ['Draft an email telling Peter the site is ready', 'Load the rest of Peter\'s photos once he sends them', 'Make Google\'s sign-in screen name the calendar site'] });
+  assert.equal(r.error, false, r.text);
+  s.text('m2', 'Done.');
+  s.result('completed');
+  // Mike ticks one follow-up (its words are his message).
+  h.runner.send(thread.id, "Make Google's sign-in screen name the calendar site");
+  s = h.adapter.sessions.filter((x) => x.opts.threadId === thread.id).at(-1)!;
+  s.init();
+  s.text('m3', 'Which of these should I build?');
+  r = await endTurn({ needs: 'you', asks: [{ question: 'Neon suggested three bigger changes. Which should I build?', options: [{ label: 'Download all' }, { label: 'None' }] }, { question: "Send the site to Peter's list now?", options: [{ label: 'Send it' }, { label: 'Wait' }] }] });
+  assert.equal(r.error, false, r.text);
+  s.text('m4', 'Asked.');
+  s.result('completed');
+  // He replies with something else, so the question goes unanswered.
+  h.runner.send(thread.id, 'Can you have Neon design a few versions?');
+  s = h.adapter.sessions.filter((x) => x.opts.threadId === thread.id).at(-1)!;
+  s.init();
+  s.text('m5', 'Design A is live.');
+  // Snoozing, archiving or waiting on threads isn't Done: no note. A blank snooze is no snooze.
+  r = await endTurn({ needs: 'nothing', snooze: ' ' });
+  assert.ok(r.text.startsWith(PROJECT_STEP_NUDGE), r.text);
+  s.result('completed');
+  h.runner.send(thread.id, 'keep going');
+  s = h.adapter.sessions.filter((x) => x.opts.threadId === thread.id).at(-1)!;
+  s.init();
+  s.text('m5b', 'Design A is live.');
+  r = await endTurn({ needs: 'nothing', snooze: '2h' });
+  assert.equal(r.error, false, r.text);
+  s.result('completed');
+  // Another agent quoting an item isn't Mike answering it.
+  h.runner.send(thread.id, `${AGENT_MESSAGE_PREFIX}abc] Still open: Draft an email telling Peter the site is ready`);
+  s = h.adapter.sessions.filter((x) => x.opts.threadId === thread.id).at(-1)!;
+  s.init();
+  s.text('m5c', 'Noted.');
+  s.result('completed');
+  // His card answer, a turn later than the card, is.
+  h.runner.send(thread.id, "Send the site to Peter's list now?\nWait", [], { answers: [{ action: "Send the site to Peter's list now?", answer: 'Wait' }] });
+  s = h.adapter.sessions.filter((x) => x.opts.threadId === thread.id).at(-1)!;
+  s.init();
+  s.text('m6', 'Fixed the review findings.');
+  r = await endTurn({ needs: 'nothing', next: ["Load the rest of Peter's photos once he sends them"] });
+  assert.ok(r.text.startsWith(PROJECT_STEP_NUDGE), r.text);
+  assert.match(r.text, /"Draft an email telling Peter the site is ready"; "Neon suggested three bigger changes\. Which should I build\?"\./);
+  // The ticked one, and one this card already carries, aren't listed.
+  assert.doesNotMatch(r.text, /sign-in screen|rest of Peter's photos|Peter's list/);
+  // Once a turn: sent again as it was, it's taken.
+  r = await endTurn({ needs: 'nothing', next: ["Load the rest of Peter's photos once he sends them"] });
+  assert.equal(r.error, false, r.text);
+
+  // A Codex sub-agent's call runs through the same handler and never reaches
+  // the thread's events, so the note is capped at once a turn in memory too.
+  s.result('completed');
+  h.runner.send(thread.id, 'next bit');
+  s = h.adapter.sessions.filter((x) => x.opts.threadId === thread.id).at(-1)!;
+  s.init();
+  const codexEnd = buildThreadbearTools(h.runner, thread.id, Date.now, undefined, projects, undefined, { provider: 'codex', oneReply: () => true, plainCardNote: false, tryFirstNote: false, sleep: async () => {} }).find((x) => x.name === 'end_turn')! as unknown as { formFor?: (a: unknown) => { handler: (a: unknown, e: unknown) => Promise<{ content: { text: string }[]; isError?: boolean }> }; handler: (a: unknown, e: unknown) => Promise<{ content: { text: string }[]; isError?: boolean }> };
+  const child = codexEnd.formFor?.({ needs: 'nothing' }) ?? codexEnd;
+  const first = await child.handler({ needs: 'nothing' }, {});
+  assert.ok(first.content[0].text.startsWith(PROJECT_STEP_NUDGE), first.content[0].text);
+  const second = await child.handler({ needs: 'nothing' }, {});
+  assert.ok(!second.content[0].text.startsWith(PROJECT_STEP_NUDGE), second.content[0].text);
+
+  // A thread another thread started, in the same project: its Done is about its own brief.
+  const helper = h.runner.create({ text: 'Fix the review window', accountId: 'claude-3', cwd: app, startedBy: { kind: 'thread', label: 'Agent', threadId: thread.id } }).thread;
+  const p = projects.list()[0];
+  projects.changeMembership(helper.id, { add: [p.id], by: 'agent' });
+  const helperEnd = buildThreadbearTools(h.runner, helper.id, Date.now, undefined, projects, undefined, { oneReply: () => true, plainCardNote: false, tryFirstNote: false, sleep: async () => {} }).find((x) => x.name === 'end_turn')!;
+  const hs = h.adapter.sessions.filter((x) => x.opts.threadId === helper.id).at(-1)!;
+  hs.init();
+  hs.text('h1', 'Fixed.');
+  const hr = (await helperEnd.handler({ needs: 'nothing' } as never, {} as never)) as { content: { text: string }[]; isError?: boolean };
+  assert.ok(!hr.isError, hr.content[0].text);
+});
+
 // The primary's side of a handover in these tests: projects with no
 // threads of their own, as the kept thread is still on the draining runner.
 const noThreads: ProjectHost = {
@@ -798,6 +963,16 @@ test('a thread finishing its turn on a draining runner changes projects on the n
   assert.equal(primary.record(p.id)?.state, 'Releases live');
   const saved = JSON.parse(fs.readFileSync(path.join(h.home, 'projects.json'), 'utf8'));
   assert.equal(saved.projects[0].notes, 'Forks follow tags.', "in the new runner's projects.json");
+  // editNotes is made on the primary, in one step.
+  assert.equal((await call('update_project', { project: p.id, editNotes: [{ old: 'Forks', new: 'Forks and mirrors' }] })).error, false);
+  assert.equal(primary.record(p.id)?.notes, 'Forks and mirrors follow tags.');
+  // An older primary without it refuses, rather than saving edits made here.
+  const older = link;
+  link = { call: async (method, params: any = {}) => (params.op === 'editNotes' ? Promise.reject(new Error('drain.projects has no editNotes')) : older!.call(method, params)) };
+  assert.equal((await call('update_project', { project: p.id, editNotes: [{ old: 'mirrors', new: 'clones' }] })).error, true);
+  assert.equal(primary.record(p.id)?.notes, 'Forks and mirrors follow tags.');
+  link = older;
+  assert.equal((await call('update_project', { project: p.id, editNotes: [{ old: 'Forks and mirrors', new: 'Forks' }] })).error, false);
   assert.match((await call('read_project', { project: p.id })).text, /\nState: Releases live\n[\s\S]*\nForks follow tags\.\n/);
 
   // A project made now is the new runner's. The kept thread joins it here,
@@ -948,14 +1123,14 @@ test("the librarian never gives a project another project's repo, a folder holdi
 });
 
 test('the librarian keeps its line on where the thread is up to as the thread\'s brief', async () => {
-  const s = setup({ models: () => reply({ projects: [], new: null, state: {}, thread: 'Waiting on Mike to pick a layout.', why: 'A one-off' }) });
+  const s = setup({ models: () => reply({ projects: [], new: null, state: {}, thread: 'Waiting on Alex to pick a layout.', why: 'A one-off' }) });
   const { h, create, finish, librarian } = s;
   const { thread } = create('Make a mockup');
   await finish(thread.id, []);
   h.clock.advance(SETTLE_MS);
   await tick(6);
   assert.equal(librarian.status().recent[0]?.text, 'Nothing to change: a one-off', 'the brief is not a project change');
-  assert.equal(h.runner.highlights(thread.id).brief?.text, 'Waiting on Mike to pick a layout.');
+  assert.equal(h.runner.highlights(thread.id).brief?.text, 'Waiting on Alex to pick a layout.');
   assert.ok(h.runner.get(thread.id).highlightsAt);
 });
 
@@ -1019,7 +1194,7 @@ test('the day counts tokens and what pool looks would have cost', async () => {
   assert.equal(st.spentTodayUsd, 0);
 });
 
-test('the librarian renames a thread that has moved on, never one Mike or an agent named', async () => {
+test('the librarian renames a thread that has moved on, never one Alex or an agent named', async () => {
   let answer: unknown = {};
   const s = setup({ models: (p) => reply(typeof answer === 'function' ? (answer as (p: GenerateParams) => unknown)(p) : answer) });
   const { h, create, finish, librarian } = s;
@@ -1060,16 +1235,16 @@ test('the librarian renames a thread that has moved on, never one Mike or an age
 
 // "Chrome browser control" kept its name after the tool it's about was
 // renamed Paws, then BrowserBear (Mike, 30 Oct 2026).
-test('the librarian renames a project whose name has gone out of date, never one Mike named', async () => {
+test('the librarian renames a project whose name has gone out of date, never one Alex named', async () => {
   let answer: unknown = {};
   const s = setup({ models: (p) => reply(typeof answer === 'function' ? (answer as (p: GenerateParams) => unknown)(p) : answer) });
   const { h, create, finish, librarian, projects } = s;
   const p = projects.create({ title: 'Chrome browser control', by: 'librarian' });
   const other = projects.create({ title: 'Other', by: 'agent' });
-  const mikes = projects.create({ title: 'Mikes name', by: 'mike' });
+  const alexs = projects.create({ title: 'Alexs name', by: 'mike' });
   assert.equal(projects.record(p.id)?.titleBy, 'librarian');
   const { thread } = create('Rename Paws to BrowserBear');
-  projects.changeMembership(thread.id, { add: [p.id, mikes.id], by: 'agent' });
+  projects.changeMembership(thread.id, { add: [p.id, alexs.id], by: 'agent' });
   // Not from the first message alone.
   answer = { projects: [], retitle: { [p.id]: 'Too soon' } };
   h.clock.advance(FIRST_MESSAGE_MS);
@@ -1077,7 +1252,7 @@ test('the librarian renames a project whose name has gone out of date, never one
   assert.equal(projects.record(p.id)?.title, 'Chrome browser control');
   // After a turn: one it's in, tidied; never one it isn't in.
   answer = (q: GenerateParams) => {
-    assert.match(q.prompt, new RegExp(`${mikes.id} "Mikes name" \\(named by the user: keep it\\)`));
+    assert.match(q.prompt, new RegExp(`${alexs.id} "Alexs name" \\(named by the user: keep it\\)`));
     assert.doesNotMatch(q.prompt, new RegExp(`${p.id} "Chrome browser control" \\(named`));
     return { projects: [], retitle: { [p.id]: ' "BrowserBear (Chrome browser control)." ', [other.id]: 'Not in it' } };
   };
@@ -1088,24 +1263,24 @@ test('the librarian renames a project whose name has gone out of date, never one
   assert.equal(projects.record(p.id)?.titleBy, 'librarian');
   assert.equal(projects.record(other.id)?.title, 'Other');
   assert.equal(librarian.status().recent[0].text, 'Renamed Chrome browser control to BrowserBear (Chrome browser control)');
-  // Mike's name stays, whatever the look says.
-  answer = { projects: [], retitle: { [mikes.id]: 'Something else' } };
+  // Alex's name stays, whatever the look says.
+  answer = { projects: [], retitle: { [alexs.id]: 'Something else' } };
   librarian.run(thread.id);
   await tick(8);
-  assert.equal(projects.record(mikes.id)?.title, 'Mikes name');
-  // An agent's rename can still be tidied later; Mike's rename in the app
+  assert.equal(projects.record(alexs.id)?.title, 'Alexs name');
+  // An agent's rename can still be tidied later; Alex's rename in the app
   // (projects.update) makes it his.
   const tools = buildThreadbearTools(h.runner, thread.id, Date.now, undefined, projects);
   await tools.find((x) => x.name === 'update_project')!.handler({ project: p.id, title: 'BrowserBear' } as never, {} as never);
   assert.equal(projects.record(p.id)?.titleBy, 'agent');
   await tools.find((x) => x.name === 'update_project')!.handler({ project: other.id, title: 'Asked for', mikeAsked: true } as never, {} as never);
   assert.equal(projects.record(other.id)?.titleBy, 'mike');
-  projectMethods(projects)['projects.update']({ projectId: p.id, title: 'BrowserBear by Mike' });
+  projectMethods(projects)['projects.update']({ projectId: p.id, title: 'BrowserBear by Alex' });
   assert.equal(projects.record(p.id)?.titleBy, 'mike');
   answer = { projects: [], retitle: { [p.id]: 'BrowserBear again' } };
   librarian.run(thread.id);
   await tick(8);
-  assert.equal(projects.record(p.id)?.title, 'BrowserBear by Mike');
+  assert.equal(projects.record(p.id)?.title, 'BrowserBear by Alex');
 });
 
 test('the librarian files a new thread from its first message, then looks again when the first turn ends', async () => {
@@ -1336,7 +1511,7 @@ test('the librarian adds a link only when the thread gave it, to a project the t
   assert.equal(librarian.status().recent[0].text, 'Added a link to Cruise');
 });
 
-test('the librarian wakes a thread hibernating on a topic when Mike talks about it in another', async () => {
+test('the librarian wakes a thread hibernating on a topic when Alex talks about it in another', async () => {
   const s = setup({
     models: (p) => {
       if (!p.prompt.includes('Router table jig')) return reply({ projects: [], new: null, state: {}, why: 'x' });
@@ -1539,7 +1714,7 @@ test("a look files a card when the thread says it's going out, and doesn't file 
   assert.deepEqual(fake.saved.map((c) => [c.title, c.threadId, c.source]), [['Post office', thread.id, 'misc']]);
   assert.match(librarian.status().recent[0].text, /Filed "Post office" in the Pocket/);
   assert.match(asked.at(-1)!.prompt, /Pocket cards from this thread:\n\(none\)/);
-  // Mike takes it out on the phone, and the thread's still about the trip.
+  // Alex takes it out on the phone, and the thread's still about the trip.
   fake.cards.length = 0;
   h.runner.send(thread.id, 'On my way there now');
   await tick();
@@ -1562,7 +1737,7 @@ test('a short "posted it" still gets a look, which takes out the thread\'s card'
   h.clock.advance(SETTLE_MS);
   await tick(8);
   s0.cards.push({ title: 'Post to Corby', text: 'Long Croft Road', threadId: thread.id, updatedAt: 'x' });
-  s0.cards.push({ title: 'Europe trip', text: 'EXBEEI', updatedAt: 'x' });
+  s0.cards.push({ title: 'Europe trip', text: 'ABC123', updatedAt: 'x' });
   const calls = asked.length;
   answer = { projects: [], why: 'Posted', pocket: { remove: ['Post to Corby', 'Europe trip'] } };
   h.runner.send(thread.id, 'Posted it');

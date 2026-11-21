@@ -11,12 +11,16 @@
 // a command's state is one get by id.
 import { ConvexError, v } from 'convex/values';
 import type { OrderedQuery } from 'convex/server';
-import { internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server';
+import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server';
 import type { DataModel, Doc, Id } from './_generated/dataModel';
-import { checkRunnerId, forbidden, pageLimit, runnerAuth, sha256, withoutCredentials } from './lib';
-import { docBytes, isThreadId } from './runnerAccess';
+import { checkRunnerId, forbidden, isSeq, MAX_SEQ, pageLimit, runnerAuth, sha256, withoutCredentials } from './lib';
+import { docBytes, isThreadId, mayTouch, ownThreadOnly } from './runnerAccess';
+import { queued, request as requestMachine } from './machines';
+import { requestStateFrom } from './requestStates';
+import { steppingFor } from './stepping';
 import { messageButton } from './schema';
 import { deleteIfUnused, MAX_COMMAND_FILES, MAX_RUNNER_UPLOAD_BYTES, storageInUse } from './sync';
+import { UPLOAD_CLAIM_MS, newClaim } from './uploads';
 
 // The live tail: enough for a message or two of tool rows between texts.
 export const TAIL_MAX = 15;
@@ -40,11 +44,17 @@ const relayRow = v.object({
   // The reply buttons its text links (API 59), as the phone gets them; the
   // relay answers buttons.list from them (API 68).
   buttons: v.optional(v.array(messageButton)),
+  // How many pictures a user's message came with (API 87), so the relay
+  // shows them without counting from the words.
+  pictures: v.optional(v.number()),
+  // The asks a user's message answered (API 89), so another Mac draws them
+  // as answers.
+  answers: v.optional(v.array(v.object({ action: v.string(), answer: v.string() }))),
   at: v.string(),
 });
 
 type Button = { id: string; title: string; kind: 'start' | 'send'; target?: string; pressedThreadId?: string; failed?: string };
-type Row = { seq: number; role: 'user' | 'assistant' | 'tool' | 'note'; text: string; origin?: string; toolKind?: string; summary?: boolean; plan?: boolean; planDecision?: 'go' | 'revise'; turn?: string; wokeBy?: { kind: string; description: string }[]; buttons?: Button[]; at: string };
+type Row = { seq: number; role: 'user' | 'assistant' | 'tool' | 'note'; text: string; origin?: string; toolKind?: string; summary?: boolean; plan?: boolean; planDecision?: 'go' | 'revise'; turn?: string; wokeBy?: { kind: string; description: string }[]; buttons?: Button[]; pictures?: number; answers?: { action: string; answer: string }[]; at: string };
 function toRow(m: Row): Row {
   return {
     seq: m.seq,
@@ -60,6 +70,9 @@ function toRow(m: Row): Row {
     ...(m.turn ? { turn: m.turn } : {}),
     ...(m.wokeBy ? { wokeBy: m.wokeBy } : {}),
     ...(m.buttons?.length ? { buttons: m.buttons } : {}),
+    // Only a count a message could have: a runner key writes what it likes.
+    ...(m.role === 'user' && Number.isSafeInteger(m.pictures) && m.pictures! >= 1 && m.pictures! <= 999 ? { pictures: m.pictures } : {}),
+    ...(m.role === 'user' && m.answers?.length ? { answers: m.answers } : {}),
     at: m.at,
   };
 }
@@ -76,15 +89,16 @@ const NOTES_SKIPPED = 500;
  * review, 13 Nov).
  */
 async function pageOf(q: OrderedQuery<DataModel['messages']>, want: number, notes: boolean | undefined): Promise<{ rows: Doc<'messages'>[]; hasMore: boolean }> {
-  if (notes) {
-    const rows = await q.take(want + 1);
-    return { rows: rows.slice(0, want), hasMore: rows.length > want };
-  }
   const rows: Doc<'messages'>[] = [];
   let read = 0;
   for await (const m of q) {
     if (++read > want + 1 + NOTES_SKIPPED) return { rows, hasMore: true };
-    if (m.role === 'note') continue;
+    // A row from before seqs were checked (lib.ts isSeq) is left out, not
+    // let break the rest of the thread on the main Mac. The pages read only
+    // 0 to MAX_SEQ of the index, so the infinities, negatives and huge ones
+    // are never read at all (a run of them would use up NOTES_SKIPPED and
+    // leave the page empty, Grok's review); fractions and NaN are skipped here.
+    if ((!notes && m.role === 'note') || !isSeq(m.seq)) continue;
     if (rows.length >= want) return { rows, hasMore: true };
     rows.push(m);
   }
@@ -98,7 +112,7 @@ export const remoteTail = query({
   handler: async (ctx, { key, threadId, limit, notes }) => {
     await runnerAuth(ctx, key, 'remoteTail');
     const want = pageLimit(limit, TAIL_MAX, TAIL_MAX);
-    const { rows, hasMore } = await pageOf(ctx.db.query('messages').withIndex('by_thread_seq', (q) => q.eq('threadId', threadId)).order('desc'), want, notes);
+    const { rows, hasMore } = await pageOf(ctx.db.query('messages').withIndex('by_thread_seq', (q) => q.eq('threadId', threadId).gte('seq', 0).lte('seq', MAX_SEQ)).order('desc'), want, notes);
     return { messages: rows.reverse().map(toRow), hasMore };
   },
 });
@@ -114,18 +128,72 @@ export const remoteMessages = query({
     await runnerAuth(ctx, key, 'remoteMessages');
     const want = pageLimit(limit, PAGE_DEFAULT, PAGE_MAX);
     if (afterSeq !== undefined) {
-      const { rows, hasMore } = await pageOf(ctx.db.query('messages').withIndex('by_thread_seq', (q) => q.eq('threadId', threadId).gt('seq', afterSeq)).order('asc'), want, notes);
+      const after = Number.isFinite(afterSeq) ? afterSeq : -1;
+      const { rows, hasMore } = await pageOf(ctx.db.query('messages').withIndex('by_thread_seq', (q) => q.eq('threadId', threadId).gt('seq', after).lte('seq', MAX_SEQ)).order('asc'), want, notes);
       return { messages: rows.map(toRow), hasMore };
     }
     const { rows, hasMore } = await pageOf(
       ctx.db
         .query('messages')
-        .withIndex('by_thread_seq', (q) => (beforeSeq === undefined ? q.eq('threadId', threadId) : q.eq('threadId', threadId).lt('seq', beforeSeq)))
+        .withIndex('by_thread_seq', (q) => q.eq('threadId', threadId).gte('seq', 0).lt('seq', beforeSeq !== undefined && Number.isFinite(beforeSeq) ? Math.min(beforeSeq, MAX_SEQ + 1) : MAX_SEQ + 1))
         .order('desc'),
       want,
       notes,
     );
     return { messages: rows.reverse().map(toRow), hasMore };
+  },
+});
+
+// How many messages one picturesAtSeqs reads, and pictures of each: a
+// message carries at most a handful (the app pastes up to 6 into one sent
+// to another runner, MAX_COMMAND_FILES), and the relay asks only for the
+// ones whose words say they have some.
+const PICTURE_SEQS_MAX = 50;
+const PICTURES_PER_SEQ = 30;
+// A pasted picture's src (runner/src/share-images.ts pastedImagesInEvent).
+const PASTED = /^picture:(\d{1,3})$/;
+
+/**
+ * The pictures pasted into the messages at `seqs` of another runner's
+ * thread (API 87), each with its file's URL: what that runner put up for
+ * the phone and the website (replyImages with src "picture:N", N being
+ * which of the message's pictures). Read by seq, so the thread's other
+ * pictures are never read. Owner only: the main Mac's runner shows them in
+ * the app and answers its files.read for them (runner/src/relay.ts).
+ */
+export const picturesAtSeqs = query({
+  args: { key: v.string(), threadId: v.string(), seqs: v.array(v.number()) },
+  returns: v.array(
+    v.object({
+      seq: v.number(),
+      n: v.number(),
+      path: v.string(),
+      url: v.string(),
+      mediaType: v.string(),
+      width: v.optional(v.number()),
+      height: v.optional(v.number()),
+    }),
+  ),
+  handler: async (ctx, { key, threadId, seqs }) => {
+    await runnerAuth(ctx, key, 'picturesAtSeqs');
+    const out = [];
+    for (const seq of [...new Set(seqs.filter(isSeq))].sort((a, b) => a - b).slice(0, PICTURE_SEQS_MAX)) {
+      const found = new Map<number, Doc<'replyImages'>>();
+      // A reply's or a pinned picture at the same seq isn't one of these:
+      // passed over, but counted, so a seq can't make this read without end.
+      let read = 0;
+      for await (const img of ctx.db.query('replyImages').withIndex('by_thread_seq', (q) => q.eq('threadId', threadId).eq('seq', seq))) {
+        if (++read > PICTURES_PER_SEQ * 2 || found.size >= PICTURES_PER_SEQ) break;
+        const n = Number(PASTED.exec(img.src ?? '')?.[1] ?? 0);
+        if (n >= 1 && !found.has(n)) found.set(n, img);
+      }
+      for (const [n, img] of [...found].sort((a, b) => a[0] - b[0])) {
+        const url = await ctx.storage.getUrl(img.storageId);
+        if (!url) continue;
+        out.push({ seq, n, path: img.path, url, mediaType: img.mediaType, ...(img.width ? { width: img.width } : {}), ...(img.height ? { height: img.height } : {}) });
+      }
+    }
+    return out;
   },
 });
 
@@ -156,7 +224,12 @@ type Kind = (typeof KINDS)[number];
 // with no file contents or tool output in them (step 4 brings those, scrubbed).
 // moves.describe and moves.preview (API 65) are the Mac's Move sheet
 // (threads.movePreview): plans only, nothing starts.
-export const CALLS = new Set(['files.list', 'moves.describe', 'moves.preview', 'threads.forkInfo', 'threads.fork']);
+// accounts.yearToken (API 90) is the Mac's Runners panel's Year-long token…
+// for one of that runner's logins: its answer is a state and the claude.ai
+// page, never a token, and its code (useless without the verifier only
+// that runner's setup-token holds) goes with the args once it's finished.
+const FORK_CALLS = new Set(['threads.forkInfo', 'threads.fork', 'threads.forkInfoAt', 'threads.forkAt']);
+export const CALLS = new Set(['files.list', 'moves.describe', 'moves.preview', 'accounts.yearToken', ...FORK_CALLS]);
 // A moves.preview's thread description: only these fields, each a short
 // string (or worktree and schedules), so nothing else sits in the row.
 const MOVE_INFO_STRINGS = ['title', 'cwd', 'home', 'provider', 'accountId', 'email', 'model', 'effort', 'permissionMode', 'origin', 'repoTop', 'subdir', 'sessionId'];
@@ -167,6 +240,7 @@ function moveInfoArg(raw: unknown): Record<string, unknown> {
   // Which repo, never a password or token in its address: the runner the
   // preview asks reads this row (an older main Mac's runner sends it whole).
   if (typeof out.origin === 'string') out.origin = withoutCredentials(out.origin);
+  if (out.origin === '') delete out.origin;
   // Nor what no target plans from: an older main Mac's runner sends the
   // thread's title (made from its first message) and session whole.
   if ('title' in out) out.title = '';
@@ -261,18 +335,28 @@ export function commandArgs(kind: Kind, raw: unknown): Record<string, unknown> {
       if (a.method === 'moves.preview') {
         const p = (a.params && typeof a.params === 'object' ? a.params : {}) as Record<string, unknown>;
         out = { method: a.method, params: { info: moveInfoArg(p.info), ...(typeof p.cwd === 'string' ? { cwd: p.cwd } : {}), ...(typeof p.accountId === 'string' ? { accountId: p.accountId } : {}) } };
-      } else if (a.method === 'threads.fork') {
+      } else if (FORK_CALLS.has(String(a.method))) {
         const p = (a.params && typeof a.params === 'object' ? a.params : {}) as Record<string, unknown>;
-        if (p.workspace !== 'same' && p.workspace !== 'worktree') throw bad('workspace must be same or worktree');
-        if (typeof p.requestId !== 'string' || !/^[a-f0-9-]{36}$/i.test(p.requestId)) throw bad('requestId must be a UUID');
-        if (p.throughTurnId !== undefined && (typeof p.throughTurnId !== 'string' || !p.throughTurnId || p.throughTurnId.length > 256)) throw bad('throughTurnId must name a completed reply');
-        out = { method: a.method, params: { workspace: p.workspace, requestId: p.requestId, ...(p.throughTurnId === undefined ? {} : { throughTurnId: p.throughTurnId }) } };
-      } else if (a.method === 'threads.forkInfo') {
-        const p = (a.params && typeof a.params === 'object' ? a.params : {}) as Record<string, unknown>;
-        if (p.throughTurnId !== undefined && (typeof p.throughTurnId !== 'string' || !p.throughTurnId || p.throughTurnId.length > 256)) throw bad('throughTurnId must name a completed reply');
-        out = { method: a.method, params: p.throughTurnId === undefined ? {} : { throughTurnId: p.throughTurnId } };
+        const create = a.method === 'threads.fork' || a.method === 'threads.forkAt';
+        const historical = a.method === 'threads.forkAt' || a.method === 'threads.forkInfoAt' || p.throughTurnId !== undefined;
+        if (historical && (typeof p.throughTurnId !== 'string' || !p.throughTurnId.trim() || p.throughTurnId.length > 256)) throw bad('throughTurnId must name a completed reply');
+        const boundary = historical ? { throughTurnId: p.throughTurnId } : {};
+        // Translate older callers too. An older owning runner refuses this
+        // method instead of treating a historical fork as a whole fork.
+        if (create) {
+          if (p.workspace !== 'same' && p.workspace !== 'worktree') throw bad('workspace must be same or worktree');
+          if (typeof p.requestId !== 'string' || !/^[a-f0-9-]{36}$/i.test(p.requestId)) throw bad('requestId must be a UUID');
+          out = { method: historical ? 'threads.forkAt' : 'threads.fork', params: { workspace: p.workspace, requestId: p.requestId, ...boundary } };
+        } else {
+          out = { method: historical ? 'threads.forkInfoAt' : 'threads.forkInfo', params: boundary };
+        }
       } else if (a.method === 'moves.describe') {
         out = { method: a.method, params: {} };
+      } else if (a.method === 'accounts.yearToken') {
+        const p = (a.params && typeof a.params === 'object' ? a.params : {}) as Record<string, unknown>;
+        if (typeof p.accountId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(p.accountId)) throw bad('accounts.yearToken needs a login');
+        if (p.code !== undefined && (typeof p.code !== 'string' || !/^[A-Za-z0-9_-]{8,512}#[A-Za-z0-9_-]{8,512}$/.test(p.code))) throw bad("that isn't a code from Claude's page");
+        out = { method: a.method, params: { accountId: p.accountId, ...(typeof p.code === 'string' ? { code: p.code } : {}), ...(p.check === true ? { check: true } : {}), ...(p.cancel === true ? { cancel: true } : {}) } };
       } else {
         out = { method: a.method, params: typeof (a.params as { path?: unknown } | undefined)?.path === 'string' ? { path: (a.params as { path: string }).path } : {} };
       }
@@ -306,18 +390,24 @@ export const queueCommand = mutation({
     await runnerAuth(ctx, key, 'queueCommand');
     checkRunnerId(runnerId);
     const method = kind === 'call' && args && typeof args === 'object' ? (args as { method?: unknown }).method : undefined;
-    if (threadId === undefined && (method === 'threads.fork' || method === 'threads.forkInfo')) throw new ConvexError({ kind: 'badArgs', message: 'a fork call needs a thread' });
+    if (threadId === undefined && FORK_CALLS.has(String(method))) throw new ConvexError({ kind: 'badArgs', message: 'a fork call needs a thread' });
     const runner = await ctx.db.query('runners').withIndex('by_runnerId', (q) => q.eq('runnerId', runnerId)).unique();
     if (!runner) throw new ConvexError({ kind: 'notFound', message: 'no such runner' });
     if (threadId !== undefined) {
       const t = await ctx.db.query('threads').withIndex('by_threadId', (q) => q.eq('threadId', threadId)).unique();
-      if (!t) throw new ConvexError({ kind: 'notFound', message: 'no such thread' });
-      if (t.runnerId !== runnerId) throw forbidden("queue that: the thread isn't that runner's");
+      // A thread on a virtual runner has no row until its box writes one
+      // (it may be booting, or waiting for a cloud token): its box row says whose it is.
+      const owner = t?.runnerId ?? (await ctx.db.query('boxes').withIndex('by_threadId', (q) => q.eq('threadId', threadId)).unique())?.runnerId;
+      if (owner === undefined) throw new ConvexError({ kind: 'notFound', message: 'no such thread' });
+      if (owner !== runnerId) throw forbidden("queue that: the thread isn't that runner's");
     } else if (kind !== 'create' && kind !== 'call') {
       throw new ConvexError({ kind: 'badArgs', message: `a ${kind} needs a thread` });
+    } else if (kind === 'create' && runner.box) {
+      // A box runs its one thread: a new one on a virtual runner is boxes:startThread's.
+      throw new ConvexError({ kind: 'badArgs', message: "That runner is one thread's box on a virtual runner: it takes no new threads." });
     }
     const images = kind === 'send' || kind === 'create' ? await commandPictures(ctx, (args as { images?: unknown } | null)?.images) : [];
-    const commandId = await ctx.db.insert('commands', { runnerId, ...(threadId !== undefined ? { threadId } : {}), kind, args: { ...commandArgs(kind, args), ...(images.length ? { images } : {}), from: 'mac' }, state: 'pending', createdAt: Date.now() });
+    const commandId = await queued(ctx, { runnerId, ...(threadId !== undefined ? { threadId } : {}), kind, args: { ...commandArgs(kind, args), ...(images.length ? { images } : {}), from: 'mac' }, createdAt: Date.now() });
     // On their way, so nothing deletes them before that runner has fetched
     // them; sync:finishCommand deletes them once it has (as a phone's photos).
     for (const image of images) await ctx.db.insert('commandFiles', { storageId: image.storageId, commandId });
@@ -361,23 +451,34 @@ async function liveRelayTicket(ctx: QueryCtx | MutationCtx, ticket: string) {
   return row && !row.usedAt && row.issuedAt > Date.now() - RELAY_TICKET_MS ? row : null;
 }
 
-// For /relay/upload, before it stores anything.
-export const relayTicketOk = internalQuery({
+// /relay/upload's first step, before it reads the body (uploads.ts
+// takeUpload): the ticket is spent here, so of many requests with one
+// ticket only the first reads anything.
+export const claimRelayUpload = internalMutation({
   args: { ticket: v.string() },
-  returns: v.boolean(),
-  handler: async (ctx, { ticket }) => (await liveRelayTicket(ctx, ticket)) !== null,
-});
-
-// The stored file is this upload's. False (the route then deletes the file):
-// a dead or used ticket, or a file over the cap. Spent whatever happens.
-export const redeemRelayUpload = internalMutation({
-  args: { ticket: v.string(), storageId: v.id('_storage'), bytes: v.number() },
-  returns: v.boolean(),
-  handler: async (ctx, { ticket, storageId, bytes }) => {
+  returns: v.union(v.object({ claim: v.string() }), v.literal(false), v.literal('later')),
+  handler: async (ctx, { ticket }) => {
     const row = await liveRelayTicket(ctx, ticket);
     if (!row) return false;
-    const ok = bytes >= 0 && bytes <= MAX_RUNNER_UPLOAD_BYTES;
-    await ctx.db.patch(row._id, { usedAt: Date.now(), ...(ok ? { storageId } : {}) });
+    const claim = newClaim();
+    await ctx.db.patch(row._id, { usedAt: Date.now(), claim });
+    return { claim };
+  },
+});
+
+// /relay/upload's last step: the stored file is this upload's. False (the
+// route then deletes the file): not this request's claim, or no file or one
+// over the cap.
+export const finishRelayUpload = internalMutation({
+  args: { ticket: v.string(), claim: v.string(), storageId: v.optional(v.id('_storage')), bytes: v.number() },
+  returns: v.boolean(),
+  handler: async (ctx, { ticket, claim, storageId, bytes }) => {
+    if (!/^[0-9a-f]{48}$/.test(ticket) || !claim) return false;
+    const hash = await sha256(ticket);
+    const row = await ctx.db.query('relayUploads').withIndex('by_hash', (q) => q.eq('ticketHash', hash)).first();
+    if (!row || row.claim !== claim || !row.usedAt || row.usedAt <= Date.now() - UPLOAD_CLAIM_MS) return false;
+    const ok = !!storageId && bytes >= 0 && bytes <= MAX_RUNNER_UPLOAD_BYTES;
+    await ctx.db.patch(row._id, { claim: undefined, ...(ok ? { storageId } : {}) });
     return ok;
   },
 });
@@ -523,6 +624,7 @@ const requestOut = v.object({
   state: stateV,
   result: v.optional(v.object({ runnerId: v.string(), runnerName: v.string(), threadId: v.string() })),
   decidedAt: v.optional(v.number()),
+  claim: v.optional(v.string()),
 });
 
 async function runnerNameOf(ctx: { db: any }, runnerId: string): Promise<string> {
@@ -548,7 +650,7 @@ export const fileRequest = mutation({
     if (!isThreadId(threadId)) throw bad("that isn't a thread id");
     // Asked from one of its own threads, so the card and its answer are its own.
     const t = await ctx.db.query('threads').withIndex('by_threadId', (q) => q.eq('threadId', threadId)).unique();
-    if (!t || t.runnerId !== caller.runnerId) throw forbidden("ask for that: the thread isn't this runner's");
+    if (!t || !mayTouch(caller, t.runnerId, threadId)) throw forbidden("ask for that: the thread isn't this runner's");
     if (await ctx.db.query('runnerRequests').withIndex('by_requestId', (q) => q.eq('requestId', requestId)).first()) throw bad('that request id is taken');
     const now = Date.now();
     // Oldest first: what's past a week goes, and then the oldest until
@@ -559,6 +661,8 @@ export const fileRequest = mutation({
       const old = now - r.createdAt > REQUEST_KEEP_MS;
       if (!old && kept < REQUESTS_KEPT_MAX) break;
       if (!old && r.state === 'claimed') continue;
+      // A box makes room among its own thread's requests only.
+      if (!ownThreadOnly(caller, r.threadId)) continue;
       await ctx.db.delete(r._id);
       kept--;
     }
@@ -566,7 +670,8 @@ export const fileRequest = mutation({
     const waiting = await ctx.db.query('runnerRequests').withIndex('by_runner_state', (q) => q.eq('runnerId', caller.runnerId).eq('state', 'pending')).take(REQUESTS_KEPT_MAX);
     const pending = waiting.filter((r) => now - r.createdAt < PENDING_LIVE_MS).length;
     if (pending >= REQUESTS_PENDING_MAX) throw new ConvexError({ kind: 'tooMany', message: `A runner key may have at most ${REQUESTS_PENDING_MAX} requests waiting` });
-    await ctx.db.insert('runnerRequests', { requestId, runnerId: caller.runnerId, threadId, target, ...request, createdAt: now, state: 'pending' });
+    const made = await requestMachine.create(ctx, { requestId, runnerId: caller.runnerId, threadId, target, ...request, createdAt: now, state: 'pending' } as never, { type: 'FILE' });
+    if (made.status !== 'done') throw new ConvexError({ kind: 'conflict', message: `the request couldn't be filed: ${made.reasons.join(' ')}` });
     return null;
   },
 });
@@ -578,17 +683,20 @@ export const runnerRequest = query({
   handler: async (ctx, { key, requestId }) => {
     const caller = await runnerAuth(ctx, key, 'runnerRequest');
     const r = await ctx.db.query('runnerRequests').withIndex('by_requestId', (q) => q.eq('requestId', requestId)).first();
-    if (!r || (!caller.owner && r.runnerId !== caller.runnerId)) return null;
-    const { _id, _creationTime, ...rest } = r;
+    if (!r || (!caller.owner && r.runnerId !== caller.runnerId) || !ownThreadOnly(caller, r.threadId)) return null;
+    const { _id, _creationTime, requestState: _s, ...rest } = r;
     return { ...rest, docId: String(_id), runnerName: await runnerNameOf(ctx, r.runnerId) };
   },
 });
 
-// What the main Mac's runner may move a request to, from where: it claims
-// one before starting it (so a retry, or another click, can't start a
-// second), then marks it allowed with where it started; it hands a claim
-// back only when starting failed here; it says no only to a pending one.
-const MOVES: Record<string, string[]> = { claimed: ['pending'], allowed: ['claimed'], pending: ['claimed'], denied: ['pending'] };
+// What the main Mac's runner may move a request to, from where, is the
+// request machine's (requestMachine.ts): it claims one before starting it
+// (so a retry, or another click, can't start a second), then marks it
+// allowed with where it started; it hands a claim back only when starting
+// failed here; it says no only to a pending one. Each `state` it asks for
+// is that machine's event.
+const EVENTS = { claimed: 'CLAIM', allowed: 'ALLOW', pending: 'HAND_BACK', denied: 'DENY' } as const;
+const CLAIM = /^[A-Za-z0-9_-]{8,64}$/;
 
 /** Mike's answer, recorded by the main Mac's runner as it starts the thread (or he said no). */
 export const decideRequest = mutation({
@@ -599,15 +707,25 @@ export const decideRequest = mutation({
     // The row as read (runnerRequest's docId): another row under this id isn't it.
     docId: v.string(),
     result: v.optional(v.object({ runnerId: v.string(), runnerName: v.string(), threadId: v.string() })),
+    // API 85: with `claimed`, the runner's id for this claim. The same claim
+    // asked again (its first answer was lost) is told yes, and nothing
+    // changes; any other claim of a claimed request is refused, as before.
+    claim: v.optional(v.string()),
   },
   returns: v.null(),
-  handler: async (ctx, { key, requestId, state, docId, result }) => {
+  handler: async (ctx, { key, requestId, state, docId, result, claim }) => {
     await runnerAuth(ctx, key, 'decideRequest');
+    if (claim !== undefined && !CLAIM.test(claim)) throw new ConvexError({ kind: 'badArgs', message: 'claim must be 8 to 64 letters, digits, - or _' });
     const r = await ctx.db.query('runnerRequests').withIndex('by_requestId', (q) => q.eq('requestId', requestId)).first();
     if (!r || String(r._id) !== docId) throw new ConvexError({ kind: 'notFound', message: 'no such request' });
-    if (!MOVES[state]!.includes(r.state)) throw new ConvexError({ kind: 'badArgs', message: `that request is ${r.state}` });
-    if (state === 'allowed' && !result) throw new ConvexError({ kind: 'badArgs', message: 'an allowed request says where it started' });
-    await ctx.db.patch(r._id, { state, ...(state === 'allowed' && result ? { result } : {}), decidedAt: Date.now() });
+    if (steppingFor('requestState')) return await decideAsBefore(ctx, r, state, result, claim);
+    if (state === 'allowed' && !result && r.state === 'claimed') throw new ConvexError({ kind: 'badArgs', message: 'an allowed request says where it started' });
+    const type = EVENTS[state];
+    const event = type === 'CLAIM' ? { type, ...(claim !== undefined ? { claim } : {}) } : type === 'ALLOW' ? { type, result: result ?? { runnerId: '', runnerName: '', threadId: '' } } : { type };
+    // The same claim asking again stays claimed and is told yes; anything
+    // the request's state doesn't take is refused as it always was.
+    const r2 = await requestMachine.send(ctx, r._id, event);
+    if (r2.status !== 'done') throw new ConvexError({ kind: 'badArgs', message: `that request is ${r.state}` });
     return null;
   },
 });
@@ -619,9 +737,31 @@ export const closeRequest = mutation({
   handler: async (ctx, { key, requestId }) => {
     const caller = await runnerAuth(ctx, key, 'closeRequest');
     const r = await ctx.db.query('runnerRequests').withIndex('by_requestId', (q) => q.eq('requestId', requestId)).first();
-    if (!r || (!caller.owner && r.runnerId !== caller.runnerId)) throw new ConvexError({ kind: 'notFound', message: 'no such request' });
+    if (!r || (!caller.owner && r.runnerId !== caller.runnerId) || !ownThreadOnly(caller, r.threadId)) throw new ConvexError({ kind: 'notFound', message: 'no such request' });
     // Only one nobody has started: a claimed one may be starting now.
-    if (r.state === 'pending') await ctx.db.patch(r._id, { state: 'closed', decidedAt: Date.now() });
+    if (r.state !== 'pending') return null;
+    if (steppingFor('requestState')) await asBefore(ctx, r, { state: 'closed', decidedAt: Date.now() });
+    else await requestMachine.send(ctx, r._id, { type: 'CLOSE' });
     return null;
   },
 });
+
+// While the deploy's stepping stone has the machine off (stepping.ts), the
+// main Mac's answer and the asking runner's close go through the way they
+// did before it: a thread already started whose `allowed` was refused would
+// otherwise leave its request claimed. The machine has never run on this
+// deployment then, so the old fields are the request's whole story; a row
+// the backfill has already reached gets its requestState again from them.
+const MOVES_BEFORE: Record<string, string[]> = { claimed: ['pending'], allowed: ['claimed'], pending: ['claimed'], denied: ['pending'] };
+async function decideAsBefore(ctx: MutationCtx, r: Doc<'runnerRequests'>, state: 'claimed' | 'allowed' | 'pending' | 'denied', result: Doc<'runnerRequests'>['result'], claim: string | undefined): Promise<null> {
+  if (state === 'claimed' && r.state === 'claimed' && claim !== undefined && r.claim === claim) return null;
+  if (!MOVES_BEFORE[state]!.includes(r.state)) throw new ConvexError({ kind: 'badArgs', message: `that request is ${r.state}` });
+  if (state === 'allowed' && !result) throw new ConvexError({ kind: 'badArgs', message: 'an allowed request says where it started' });
+  await asBefore(ctx, r, { state, ...(state === 'allowed' && result ? { result } : {}), ...(state === 'claimed' ? { claim } : state === 'pending' ? { claim: undefined } : {}), decidedAt: Date.now() });
+  return null;
+}
+
+async function asBefore(ctx: MutationCtx, r: Doc<'runnerRequests'>, fields: Partial<Doc<'runnerRequests'>>): Promise<void> {
+  const backfilled = (r as Partial<Doc<'runnerRequests'>>).requestState !== undefined;
+  await ctx.db.patch(r._id, { ...fields, ...(backfilled ? { requestState: requestStateFrom({ ...r, ...fields }) } : {}) });
+}

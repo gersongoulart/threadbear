@@ -20,8 +20,8 @@ class SettingsTest {
     }
 
     @Test fun aDraggedOrderHoldsUntilTheBackendAgrees() {
-        val list = listOf(runner("m5"), runner("bruce"), runner("cloud"))
-        val dragged = listOf("cloud", "m5", "bruce")
+        val list = listOf(runner("laptop"), runner("mac-mini"), runner("cloud"))
+        val dragged = listOf("cloud", "laptop", "mac-mini")
         // A heartbeat from before the backend had it: still the dragged order.
         val early = RunnerOrder.receive(list, dragged)
         assertFalse(early.caughtUp)
@@ -34,12 +34,12 @@ class SettingsTest {
     }
 
     @Test fun aNewRunnerMeanwhileGoesAtTheEnd() {
-        val list = listOf(runner("pixel"), runner("m5"), runner("bruce"))
-        val got = RunnerOrder.receive(list, listOf("bruce", "m5"))
-        assertEquals(listOf("bruce", "m5", "pixel"), got.runners.map { it.runnerId })
+        val list = listOf(runner("phone"), runner("laptop"), runner("mac-mini"))
+        val got = RunnerOrder.receive(list, listOf("mac-mini", "laptop"))
+        assertEquals(listOf("mac-mini", "laptop", "phone"), got.runners.map { it.runnerId })
         assertNull(got.runners.last().placed)
         // A runner gone from the list doesn't hold it up.
-        assertTrue(RunnerOrder.receive(listOf(runner("m5")), listOf("bruce", "m5")).caughtUp)
+        assertTrue(RunnerOrder.receive(listOf(runner("laptop")), listOf("mac-mini", "laptop")).caughtUp)
     }
 
     @Test fun noDragIsTheBackendsList() {
@@ -50,13 +50,13 @@ class SettingsTest {
 
     @Test fun offlineOnlyOnceEveryRunnerIs() {
         assertNull(RunnerOrder.offlineText(emptyList(), NOW))
-        assertNull(RunnerOrder.offlineText(listOf(runner("m5", 600), runner("bruce")), NOW))
-        val one = RunnerOrder.offlineText(listOf(runner("m5", 600)), NOW)!!
+        assertNull(RunnerOrder.offlineText(listOf(runner("laptop", 600), runner("mac-mini")), NOW))
+        val one = RunnerOrder.offlineText(listOf(runner("laptop", 600)), NOW)!!
         assertTrue(one.startsWith("Mac offline since "), one)
-        val two = RunnerOrder.offlineText(listOf(runner("m5", 900), runner("bruce", 600)), NOW)!!
-        assertTrue(two.startsWith("BRUCE offline since "), two)
-        assertEquals("Online", RunnerOrder.status(runner("m5"), NOW))
-        assertTrue(RunnerOrder.status(runner("m5", 600), NOW).startsWith("Last seen "))
+        val two = RunnerOrder.offlineText(listOf(runner("laptop", 900), runner("mac-mini", 600)), NOW)!!
+        assertTrue(two.startsWith("MAC-MINI offline since "), two)
+        assertEquals("Online", RunnerOrder.status(runner("laptop"), NOW))
+        assertTrue(RunnerOrder.status(runner("laptop", 600), NOW).startsWith("Last seen "))
     }
 
     @Test fun settingsCallsCarryTheirArguments() = runTest {
@@ -69,5 +69,23 @@ class SettingsTest {
         assertEquals("\"off\"", t.calls[0].second["notify"].toString())
         assertEquals("\"tok\"", t.calls[0].second["apnsToken"].toString())
         assertEquals("""["a","b"]""", t.calls[1].second["runnerIds"].toString())
+    }
+
+    @Test fun webPushRegistrationAndTheVapidKey() = runTest {
+        val t = FakeTransport()
+        t.mutations = { _, _ -> "null" }
+        t.actions = { _, _ -> """{"vapid":"BKey_-1"}""" }
+        val b = PhoneBackend(t, "x")
+        assertEquals("BKey_-1", b.webPushKey())
+        b.registerDevice("https://ntfy.sh/upX", "production", "webpush", "k", WebPush.Keys("p", "a"))
+        assertEquals(listOf("phone:webPushKey", "phone:registerDevice"), t.calls.map { it.first })
+        assertEquals("\"x\"", t.calls[0].second["token"].toString())
+        val reg = t.calls[1].second
+        assertEquals("\"https://ntfy.sh/upX\"", reg["apnsToken"].toString())
+        assertEquals("\"webpush\"", reg["platform"].toString())
+        assertEquals("""{"p256dh":"p","auth":"a"}""", reg["webPush"].toString())
+        // A Firebase registration is as before: no webPush field.
+        b.registerDevice("fcm", "production", "android", "k")
+        assertEquals(null, t.calls[2].second["webPush"])
     }
 }

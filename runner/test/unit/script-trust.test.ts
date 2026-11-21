@@ -10,6 +10,7 @@ import { tmpDir } from '../helpers/fakes.ts';
 import { findWorktreePatch, loadPatchSet } from '../../src/patches.ts';
 import { namedPaths, patchHash, PatchTrust, scanModule } from '../../src/patch-trust.ts';
 import { reachOf } from '../../src/script-trust.ts';
+import { IS_WINDOWS } from '../helpers/platform.ts';
 
 let n = 0;
 // A repo (a .git folder is enough for its top) with a patch and files.
@@ -123,7 +124,8 @@ test('a script the patch names still asks again when it changes or turns up, and
   }
   // Named, missing: ./build/tool.sh turns up, and so does an
   // extensionless program in a command's place.
-  for (const [run, made] of [['./build/tool.sh --go', 'build/tool.sh'], ['./bin/tool', 'bin/tool']]) {
+  // (An extensionless program only exists where files have an executable bit; NTFS has none.)
+  for (const [run, made] of [['./build/tool.sh --go', 'build/tool.sh'], ...(IS_WINDOWS ? [] : [['./bin/tool', 'bin/tool']])]) {
     const { folder, file } = repo(`export default { actions: [{ title: 'Go', run: ${JSON.stringify(run)} }] };\n`, {});
     const trust = new PatchTrust();
     trust.trustCurrent([file]);
@@ -144,6 +146,7 @@ test('a script the patch names still asks again when it changes or turns up, and
   }
   // So is an executable or #! file it only names, whatever its extension.
   for (const [name, body, mode] of [['run.cfg', 'echo hi\n', 0o755], ['hook.data', '#!/bin/sh\necho hi\n', 0o644]] as const) {
+    if (IS_WINDOWS && mode === 0o755) continue; // no executable bit on NTFS: only the #! file counts there
     const { folder, file } = repo(`export default { actions: [{ title: 'Go', run: 'true ./${name}' }] };\n`, { [name]: body });
     fs.chmodSync(path.join(folder, name), mode);
     const trust = new PatchTrust();
@@ -228,8 +231,8 @@ test("an action's script can't stop the follow either: what comes after it wasn'
 
 // Mike's own hooks, as poddle and mikecann.blog have them (5 Nov): they
 // must keep loading, and what they run is covered.
-test("poddle's and mikecann.blog's hook scripts load, and changing anything they run asks again", async () => {
-  const poddle = () =>
+test("pantry's and alex.blog's hook scripts load, and changing anything they run asks again", async () => {
+  const pantry = () =>
     repo(`export default { hooks: [{ title: "BDD pairing", on: "turn.end", run: "./scripts/bdd-check.sh", edited: "features/**", tell: "failures" }] };\n`, {
       'scripts/bdd-check.sh': '#!/bin/zsh\n# The "BDD pairing" hook.\ncd "$(dirname "$0")/.." || exit 1\nnpm run -s test:bdd-check\n',
       'package.json': JSON.stringify({ scripts: { check: 'npm run typecheck && npm test', 'test:bdd-check': 'node scripts/verify-bdd-pairing.mjs && node scripts/bdd-drift.mjs' } }),
@@ -246,7 +249,7 @@ test("poddle's and mikecann.blog's hook scripts load, and changing anything they
       'public/images/fallback-post-header.png': 'png',
     });
   for (const [make, script, changes] of [
-    [poddle, 'scripts/bdd-check.sh', ['scripts/bdd-drift.mjs', 'scripts/verify-bdd-pairing.mjs', 'package.json']],
+    [pantry, 'scripts/bdd-check.sh', ['scripts/bdd-drift.mjs', 'scripts/verify-bdd-pairing.mjs', 'package.json']],
     [blog, 'scripts/validate-posts.sh', ['scripts/validatePosts.ts', 'scripts/lib/images.ts', 'utils/posts.ts', 'package.json']],
   ] as const) {
     const { folder, file } = make();
@@ -255,7 +258,7 @@ test("poddle's and mikecann.blog's hook scripts load, and changing anything they
     const set = await load(folder, trust);
     assert.equal(set.patches[0].error, undefined, script);
     const real = fs.realpathSync(folder);
-    assert.equal(set.hooks[0].exec, `cd '${real}' && '${real}/${script}'`);
+    assert.equal(set.hooks[0].exec, `cd '${real}' && '${path.join(real, script)}'`);
     // A picture a script names isn't hashed: redrawing it asks nothing.
     assert.equal(patchHash(file).deps.some((d) => d.path.endsWith('.png')), false);
     for (const changed of changes) {

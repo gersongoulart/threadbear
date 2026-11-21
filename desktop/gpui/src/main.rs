@@ -4,6 +4,12 @@
 // channel; requests run there too and their results come back as tasks.
 // Read-outs that exist only for the scripted control (`automation.rs`).
 #![cfg_attr(not(feature = "automation"), allow(dead_code, unused_imports))]
+// A Windows release is a windowed program, not a console one: without this
+// Windows opens a cmd window behind the app for its stderr (Mike's Dell, 17
+// Nov). Its log goes to a file instead (app_log.rs). Debug and scripted
+// builds keep the console, as the specs and anyone running one by hand read
+// what it prints.
+#![cfg_attr(all(windows, not(debug_assertions), not(feature = "automation")), windows_subsystem = "windows")]
 mod a11y;
 mod activity;
 mod activity_panels;
@@ -18,12 +24,15 @@ mod app_update;
 mod automation;
 #[cfg(feature = "automation")]
 mod automation_compat;
+#[cfg(any(test, feature = "automation"))]
+mod automation_screenshot;
 mod chips;
 mod colour_space;
 mod composer_media;
 #[cfg(target_os = "macos")]
 mod composer_url;
 mod composer;
+mod confetti;
 mod composer_card;
 mod composer_account;
 mod composer_answers;
@@ -42,9 +51,12 @@ mod explain_pane;
 mod far_rows;
 mod file_drag;
 mod file_edit;
+mod file_thumbs;
+mod fit_picture;
 mod file_find;
 mod file_watch;
 mod files;
+mod fonts;
 mod files_store;
 mod folders;
 #[cfg(feature = "frame-stats")]
@@ -54,6 +66,7 @@ mod handover;
 mod input_probe;
 mod header;
 mod highlights;
+mod pr_view;
 mod highlights_board;
 mod highlights_project;
 mod highlights_store;
@@ -91,6 +104,7 @@ mod reply_buttons;
 mod reply_links;
 mod review_window;
 mod rich_boxes;
+mod live_pages;
 mod rich_window;
 mod row_motion;
 mod row_swipe;
@@ -118,11 +132,15 @@ mod terminal;
 mod terminal_element;
 mod thread;
 mod text_services;
+mod native_text;
 mod thread_map;
 mod tips;
+mod token_card;
 mod thread_panels;
+mod thread_link_marks;
 mod tour;
 mod setup_panel;
+mod hello;
 mod unsent;
 mod updates_panel;
 mod usage;
@@ -252,6 +270,14 @@ fn main() {
     let links = deep_links::receive(&application);
     application.run(|cx| {
         gpui_kit::init(cx);
+        // Fonts the app carries (fonts.rs), before anything is measured in one.
+        fonts::register(cx);
+        // An untouched caret should not redraw the window indefinitely.
+        // It stays visible after ten seconds and resumes on editing or focus.
+        gpui_kit::component::Theme::update(cx, |theme| {
+            theme.cursor_blink = theme.cursor_blink.with_idle_timeout(std::time::Duration::from_secs(10));
+        });
+        native_text::init(cx);
         // Every window's colours as sRGB, before the first opens (colour_space.rs).
         colour_space::install(cx);
         composer_media::install(cx);
@@ -292,7 +318,8 @@ fn main() {
                 window_min_size: Some(size(px(760.), px(480.))),
                 app_id: Some("threadbear".into()),
                 focus,
-                show: !hidden,
+                // A dev-app.sh copy is ordered in unseen (scripted.rs).
+                show: !hidden && !scripted::unseen(),
                 ..Default::default()
             },
             cx,
@@ -303,7 +330,7 @@ fn main() {
         // window is in front (window_menu.rs).
         window.update(cx, |_, w, cx| window_menu::install(w, cx)).ok();
         if scripted::keep_behind() {
-            window.update(cx, |_, w, _| scripted::send_behind(w)).ok();
+            window.update(cx, |_, w, _| scripted::place(w)).ok();
         }
         if hidden {
             window.update(cx, |_, w, _| handover::conceal(w)).ok();

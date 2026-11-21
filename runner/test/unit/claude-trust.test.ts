@@ -5,13 +5,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { FakeAccounts, makeHarness, tick, tmpDir, withCodex } from '../helpers/fakes.ts';
+import { escapeRegExp, skipOnWindows } from '../helpers/platform.ts';
 import { checkSummary } from '../helpers/protocol-check.ts';
 import { claudeCommands, claudeSettingsWithoutCommands, CLAUDE_PATCH_ID, setMaxWalkForTests } from '../../src/claude-trust.ts';
 import { PatchTrust } from '../../src/patch-trust.ts';
 import { trustedSettings, untrustedSettings } from '../../src/adapters/claude/adapter.ts';
 
 // A repo's .claude/settings.json with a SessionStart hook that runs a
-// script of its own, as ~/dev/me/lets-build-it's does.
+// script of its own, as ~/code/lets-build-it's does.
 function hooked(folder: string, extra: Record<string, unknown> = {}): { settings: string; script: string } {
   fs.mkdirSync(path.join(folder, '.claude', 'hooks'), { recursive: true });
   const script = path.join(folder, '.claude', 'hooks', 'session-start.mjs');
@@ -35,7 +36,7 @@ test('settings with nothing that runs a command ask nothing; hooks, a status lin
   // In a Full thread, where allow rules grant nothing more.
   assert.equal(claudeCommands(plain, home), undefined);
   assert.equal(claudeCommands(path.join(home, 'none'), home), undefined);
-  // A thread in home: its .claude/settings.json is Mike's own user settings.
+  // A thread in home: its .claude/settings.json is Alex's own user settings.
   hooked(home);
   assert.equal(claudeCommands(home, home), undefined);
 
@@ -62,7 +63,7 @@ test('settings with nothing that runs a command ask nothing; hooks, a status lin
   assert.equal(claudeCommands(sub, home), undefined);
   fs.writeFileSync(path.join(repo, '.mcp.json'), JSON.stringify({ mcpServers: { local: { command: 'node', args: ['./server.js'] } } }));
   assert.deepEqual(claudeCommands(sub, home)?.files, [path.join(repo, '.mcp.json')]);
-  // One above home is Mike's own and isn't looked for.
+  // One above home is Alex's own and isn't looked for.
   assert.equal(claudeCommands(sub, repo), undefined);
 
   // A file that isn't plain JSON can't be told apart, so it asks.
@@ -119,7 +120,7 @@ test("what's left while untrusted: project and local settings merged, without an
     permissions: { deny: ['Bash(rm:*)'], ask: ['WebFetch'] },
     model: 'sonnet',
   });
-  // How the adapter starts Claude with them: Mike's own settings, these as
+  // How the adapter starts Claude with them: Alex's own settings, these as
   // flag settings, and the folder named again for its CLAUDE.md.
   assert.deepEqual(untrustedSettings(dir, { model: 'sonnet' }), { settingSources: ['user'], additionalDirectories: [dir], settings: { model: 'sonnet' } });
   assert.deepEqual(untrustedSettings(dir, {}), { settingSources: ['user'], additionalDirectories: [dir] });
@@ -155,6 +156,8 @@ test('trust is per folder in the patch trust file, a worktree counts as its main
   const main = path.join(root, 'app');
   fs.mkdirSync(main);
   git(main, 'init', '-q', '-b', 'main');
+  // The checkout in the worktree must read the same bytes as main, whatever git's system settings say about line endings.
+  git(main, 'config', 'core.autocrlf', 'false');
   const { script } = hooked(main);
   git(main, 'add', '-A');
   git(main, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'first');
@@ -218,7 +221,9 @@ test("runner: a Claude thread in a folder with untrusted hooks starts without th
   const s = h.adapter.last;
   // The repo's allow rule is held back with its hooks.
   assert.deepEqual(s.opts.untrustedProjectSettings, {});
-  assert.ok(h.events(thread.id).some((e) => e.type === 'system.note' && /Skipped this folder's Claude Code hooks, commands, permissions and environment settings \(\.claude\/settings\.json\): you haven't trusted them yet/.test(e.text)));
+  // The file as the platform writes it: .claude/settings.json, and .claude\settings.json on Windows only.
+  const skipped = new RegExp(`Skipped this folder's Claude Code hooks, commands, permissions and environment settings \\(${escapeRegExp(path.join('.claude', 'settings.json'))}\\): you haven't trusted them yet`);
+  assert.ok(h.events(thread.id).some((e) => e.type === 'system.note' && skipped.test(e.text)));
   let t = h.runner.get(thread.id);
   assert.deepEqual(checkSummary(t), []);
   const waiting = t.patches?.find((p) => p.id === CLAUDE_PATCH_ID);
@@ -357,7 +362,7 @@ test('F2/F8: trusting them in a thread that asks first covers Full there too; tr
   const asking = trust.checkClaude(dir, ASKING);
   assert.ok(!full.trusted && !asking.trusted);
   assert.notEqual(full.hash, asking.hash, 'the allow rule is in the asking hash only');
-  // Mike's trust from before: the hooks, in a Full thread.
+  // Alex's trust from before: the hooks, in a Full thread.
   trust.trustClaude(dir, full.hash);
   assert.ok(trust.checkClaude(dir).trusted, 'Full keeps the trust it had');
   const still = trust.checkClaude(dir, ASKING);
@@ -438,7 +443,7 @@ test('F23: agents, skills and commands whose frontmatter has hooks or MCP server
     fs.writeFileSync(path.join(repo, rel), text);
     return path.join(repo, rel);
   };
-  // Plain ones, as Mike's own repos have (name and description), ask nothing.
+  // Plain ones, as Alex's own repos have (name and description), ask nothing.
   write('.claude/skills/plain/SKILL.md', '---\nname: plain\ndescription: >\n  Does a thing: well.\n---\nBody with hooks: in it\n');
   write('.claude/agents/plain.md', '---\nname: plain\ndescription: x\ntools: Read, Grep\n---\nhi\n');
   write('.claude/commands/plain.md', '---\ndescription: x\n---\n!`ls`\n');
@@ -661,7 +666,7 @@ test("review: an edit approved in an Ask thread doesn't carry on permission rule
   trust.trustClaude(dir, full.hash); // the hooks, trusted in Full (before this fix too)
   assert.ok(trust.checkClaude(dir).trusted); // a Full session reads them
   assert.ok(!trust.checkClaude(dir, ASKING).trusted);
-  // Mike approves an edit to the hook script in an Ask thread.
+  // Alex approves an edit to the hook script in an Ask thread.
   fs.writeFileSync(script, 'console.log("v2")\n');
   trust.trustClaudeEdit(dir, script, sha(script), null);
   assert.ok(trust.checkClaude(dir).trusted, 'the edit carries on what was trusted for Full');
@@ -1047,7 +1052,7 @@ test('review 7: plain frontmatter hooks, as Claude\'s docs write them, still can
 
 // ---- The review's eighth round ----
 
-test('review 8: a submodule with a newline in its name, BASH_ENV by a bare name, --preserve-symlinks in NODE_OPTIONS, a subshell function, escaped JavaScript names', () => {
+test('review 8: a submodule with a newline in its name, BASH_ENV by a bare name, --preserve-symlinks in NODE_OPTIONS, a subshell function, escaped JavaScript names', skipOnWindows('Windows cannot have a newline in a folder name, which this test makes'), () => {
   const home = tmpDir();
   const repo = path.join(home, 'cloned');
   fs.mkdirSync(repo, { recursive: true });

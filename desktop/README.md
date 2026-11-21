@@ -137,6 +137,16 @@ dev runner's `--home`, then `do`, `dump`, `shot`, `rebuild`, `log` and
 data folder and its live runner, and copies to a pasteboard of its own
 (`gpui/src/scripted.rs`).
 
+To film it for a clip, run `scripts/film.sh` from the M5 (`--help` has a
+whole take). It starts the same app on Tinker Desk's desktop with `--film`:
+a normal window in front with no test-copy label, on the mock runner with
+your `MOCK_SCRIPTED_TURNS` file, moved onto a 2x virtual display
+(`scripts/film/stage.m`) so the recording is sharp. Then `film.sh do` drives
+it and `film.sh record` records the window with
+`site/scripts/record-window.swift` and copies the `.mov` back. `--film`
+refuses to start anywhere film.sh hasn't set it up, as its window comes to
+the front.
+
 The build runs on an `updateBuildHosts` Mac and comes back here. Its Lucide
 SVGs are embedded in debug builds too (`rust-embed/debug-embed` in
 `gpui/Cargo.toml`), so it needs no files from that Mac's Cargo registry.
@@ -155,13 +165,29 @@ image dimensions or its loading/failure state. On a Mac,
 `bash desktop/scripts/test-media-hover.sh` checks descriptor ownership, bounds,
 private snapshots and late decoder callbacks with generated media.
 
+The Mac selection bridge is `gpui/src/native_text.rs` and
+`native/text_selection.m`; Translate's public SwiftUI popover is the small
+`native/translation.swift` anchor. A root plugin watches focus/selection
+changes once per window. It passes frozen plain text to AppKit; a return
+rechecks the original field, range, words and editability before an undoable edit.
+`native-text` automation uses real AppKit requestors with unique pasteboards;
+its test-only entrypoints are absent from release builds. Native focus specs
+carry `@real-screen` and run on Tinker Desk under the host lease.
+
 ## Seeing it on a server
 
-`scripts/shot.sh OUT_DIR [--home DIR] [--click X,Y | --type TEXT | --key KEY]...`
+`scripts/shot.sh OUT_DIR [--home DIR] [--click X,Y | --type TEXT | --key KEY]... [--record S]`
 runs the debug build (`cargo build -p threadbear-gpui`) on a virtual display
 (Xvfb) with Mesa's software Vulkan, against the mock (or the runner in
 `--home`), and saves screenshots: `0.png` before any step, then one after
-each.
+each. `--record S` also films the window through the steps for S seconds to
+`clip.mp4` (needs ffmpeg), for motion when no Mac's screen is free. Under
+`remote.sh cloud` it finds the build in `$CARGO_TARGET_DIR` by itself:
+
+```bash
+scripts/remote.sh cloud -- bash -c 'cd desktop && cargo build -p threadbear-gpui && scripts/shot.sh /tmp/out --record 6 --key Return'
+scp 'cloud:/tmp/out/*' .
+```
 
 ## Known gaps
 

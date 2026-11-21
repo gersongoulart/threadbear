@@ -1,6 +1,6 @@
 // The Swift Mac app, through app/Tools/dev-app.sh: a debug build in a temp
 // bundle, on the mock runner, with its window kept behind everything.
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -11,6 +11,19 @@ const run = promisify(execFile);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const script = path.join(root, 'app/Tools/dev-app.sh');
 let instances = 0;
+
+// dev-app.sh's instance folders: under TMPDIR, else macOS's temp folder for
+// this account (getconf), else /tmp/threadbear-<uid>, as the script picks
+// it. Never a name in the shared /tmp anyone could own,
+// where another account's folder of the same name stopped the tests
+// (Tinker Desk, 19 Nov 2026).
+function stateRoot(): string {
+  let tmp = process.env.TMPDIR;
+  if (!tmp) {
+    try { tmp = execFileSync('getconf', ['DARWIN_USER_TEMP_DIR'], { encoding: 'utf8' }).trim(); } catch { tmp = ''; }
+  }
+  return path.join(tmp || `/tmp/threadbear-${process.getuid?.() ?? 0}`, 'threadbear-dev-app');
+}
 
 export class SwiftDriver implements Driver {
   readonly name = 'swift' as const;
@@ -25,11 +38,11 @@ export class SwiftDriver implements Driver {
     let instance = '';
     if (registry) {
       // Match the launcher's fallback exactly; os.tmpdir() also uses TMP/TEMP.
-      const stateRoot = path.join(process.env.TMPDIR || '/tmp', 'threadbear-dev-app');
-      fs.mkdirSync(stateRoot, { recursive: true });
+      const folder = stateRoot();
+      fs.mkdirSync(folder, { recursive: true });
       // dev-app.sh canonicalizes the instance root too, which can itself be
       // a symlink. A mismatched path would miss the private-app adapter.
-      instance = path.join(fs.realpathSync(stateRoot), this.id);
+      instance = path.join(fs.realpathSync(folder), this.id);
     }
     const { stdout } = await run(registry ? 'perl' : script, registry
       ? [path.join(root, 'scripts/perf-swift.pl'), '--run', registry,
@@ -53,6 +66,20 @@ export class SwiftDriver implements Driver {
     // TB_BEAR_DATE: the bears' clock (bedtime, December's hat), for clips of them.
     const bearDate = process.env.TB_BEAR_DATE ? ['--bear-date', process.env.TB_BEAR_DATE] : [];
     await this.script(['start', '--mock', ...fixtures, ...bearDate, '--no-build', '--id', this.id, '--size', '1180x800'], 120);
+  }
+
+  /** The current private app process, for process-level performance counters. */
+  async processId(): Promise<number> {
+    const status = await this.script(['status']);
+    const line = status.split('\n').find(line => line.trim().replace(/^\*\s*/, '').startsWith(`${this.id} `));
+    const pid = line?.match(/running, pid (\d+)/)?.[1];
+    if (!pid) throw new Error(`The Swift test app ${this.id} is not running.`);
+    return Number(pid);
+  }
+
+  /** The owned bundle's executable, for PID-targeted benchmark activation. */
+  privateExecutablePath(): string {
+    return path.join(fs.realpathSync(stateRoot()), this.id, 'Threadbear.app', 'Contents', 'MacOS', 'Threadbear');
   }
 
   async do(cmd: Record<string, unknown>, timeoutSeconds = 30): Promise<string> {

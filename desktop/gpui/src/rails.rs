@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 use threadbear_core::juice;
 use threadbear_core::shortcuts::ShortcutCommand;
+use threadbear_core::updates::NextVersion;
 use crate::tips::Tip as _;
 
 /// `ActivityBar.width`.
@@ -51,6 +52,9 @@ thread_local! {
     /// When each button was last clicked, for its bounce. The window draws
     /// on one thread.
     static TAPS: RefCell<HashMap<SharedString, Instant>> = RefCell::new(HashMap::new());
+    /// Whether each button's count and dot showed last time it was drawn,
+    /// and when the one showing turned up, to pop it in.
+    static SHOWN: RefCell<HashMap<String, (bool, Option<Instant>)>> = RefCell::new(HashMap::new());
     /// The view buttons' lit square: where each button was laid out this
     /// frame, the one lit, and the square on its way from the last one.
     static LIT: RefCell<Lit> = RefCell::new(Lit::default());
@@ -118,6 +122,73 @@ fn bouncing(id: &SharedString, icon: Icon) -> AnyElement {
     .into_any_element()
 }
 
+/// The Updates icon as the next version stands, so a glance says it
+/// without opening the panel (`next_version`): a quarter of a ring going
+/// round its circle while it builds, and filled green once it's ready, popping
+/// in as the dot does. None for the plain icon. Mike picked these from three
+/// on 19 Nov (review d3ac73e3), after a week of opening Updates to look.
+fn updates_face(next: NextVersion, cx: &App) -> Option<AnyElement> {
+    let ready_pop = turned_up("updates-ready".to_owned(), next == NextVersion::Ready);
+    match next {
+        NextVersion::None => None,
+        NextVersion::Coming => {
+            let faint = style::secondary_text(cx).opacity(0.35);
+            let ring = crate::spinner::TurningArc::new(UPDATES_RING, cx.theme().foreground).sweep(0.25).outside_threads();
+            Some(
+                div()
+                    .relative()
+                    .size(px(15.))
+                    .child(icons::symbol("arrow.down.circle").with_size(px(15.)).text_color(faint))
+                    .child(div().absolute().top(px((15. - UPDATES_RING) / 2.)).left(px((15. - UPDATES_RING) / 2.)).child(ring))
+                    .into_any_element(),
+            )
+        }
+        NextVersion::Ready => {
+            let reduce = cx.reduce_motion();
+            let pop_length = if reduce { juice::POP_REDUCED } else { juice::POP };
+            let green = div()
+                .size(px(14.))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(style::tick_green(cx))
+                .child(icons::symbol("arrow.down").with_size(px(9.)).text_color(cx.theme().background));
+            Some(match ready_pop {
+                Some(at) => green
+                    .with_animation(SharedString::from(format!("rail-updates-ready-{at:?}")), Animation::new(pop_length), move |g, t| {
+                        let (scale, opacity) = juice::pop_in(pop_length.mul_f32(t), reduce);
+                        g.size(px(14. * scale)).opacity(opacity)
+                    })
+                    .into_any_element(),
+                None => green.into_any_element(),
+            })
+        }
+    }
+}
+
+/// The ring's side, as TurningArc reckons it (3 in from the sides): the
+/// icon's own circle at 15 points.
+const UPDATES_RING: f32 = 15.5;
+
+/// When the count or dot at `key` turned up, while it's still popping in
+/// (`Juice.popIn`): it pops only on turning up, not when the app first draws
+/// it, nor when it changes number (that rolls).
+fn turned_up(key: String, shown: bool) -> Option<Instant> {
+    SHOWN.with(|m| {
+        let mut m = m.borrow_mut();
+        let entry = m.entry(key).or_insert((shown, None));
+        if shown && !entry.0 {
+            entry.1 = Some(Instant::now());
+        }
+        entry.0 = shown;
+        if !shown {
+            entry.1 = None;
+        }
+        entry.1.filter(|at| at.elapsed() < juice::POP)
+    })
+}
+
 /// `ActivityButton`: an icon, the hover square, a lit square for the view on
 /// show, and a count or a dot in the corner.
 fn rail_button(button: RailButton, on_click: impl Fn(&mut Threadbear, &mut Window, &mut Context<Threadbear>) + 'static, cx: &mut Context<Threadbear>) -> AnyElement {
@@ -163,32 +234,53 @@ fn rail_button(button: RailButton, on_click: impl Fn(&mut Threadbear, &mut Windo
         }))
         .when(button.view, |s| s.child(marker))
         .child(face);
+    let reduce = cx.reduce_motion();
+    let pop_length = if reduce { juice::POP_REDUCED } else { juice::POP };
+    let badge_shown = button.badge.is_some_and(|b| b > 0);
+    let badge_pop = turned_up(format!("badge-{badge_key}"), badge_shown);
+    let dot_pop = turned_up(format!("dot-{badge_key}"), !badge_shown && (button.dot || button.quiet_dot));
     if let Some(badge) = button.badge.filter(|b| *b > 0) {
         // Grey, not accent: a count of what's there, not an alarm. It rolls
         // to a new number (row_motion.rs), as the Swift badge does.
         let text = crate::row_motion::rolling(&format!("rail-{}", badge_key), badge, 12., cx.reduce_motion(), |n| div().child(if n > 99 { "99+".to_string() } else { n.to_string() }).into_any_element());
-        el = el.child(
-            div()
-                .absolute()
-                .top(px(-2.))
-                .right(px(-3.))
-                .min_w(px(14.))
-                .h(px(14.))
-                .px(px(3.5))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(background)
-                .border_1()
-                .border_color(separator)
-                .text_size(px(9.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(secondary)
-                .child(text),
-        );
+        let pill = div()
+            .absolute()
+            .top(px(-2.))
+            .right(px(-3.))
+            .min_w(px(14.))
+            .h(px(14.))
+            .px(px(3.5))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(background)
+            .border_1()
+            .border_color(separator)
+            .text_size(px(9.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(secondary)
+            .child(text);
+        el = match badge_pop {
+            // Turning up: it grows from a fifth of its size about its middle,
+            // drawn smaller rather than scaled (GPUI can't scale a box).
+            Some(at) => el.child(pill.with_animation(SharedString::from(format!("rail-badge-pop-{badge_key}-{at:?}")), Animation::new(pop_length), move |pill, t| {
+                let (scale, opacity) = juice::pop_in(pop_length.mul_f32(t), reduce);
+                let grow = 14. * (1. - scale) / 2.;
+                pill.top(px(-2. + grow)).right(px(-3. + grow)).min_w(px(14. * scale)).h(px(14. * scale)).px(px(3.5 * scale)).text_size(px(9. * scale)).opacity(opacity)
+            })),
+            None => el.child(pill),
+        };
     } else if button.dot || button.quiet_dot {
-        el = el.child(div().absolute().top(px(1.)).right(px(1.)).size(px(7.)).rounded_full().bg(dot_color).border_1().border_color(background));
+        let dot = div().absolute().top(px(1.)).right(px(1.)).size(px(7.)).rounded_full().bg(dot_color).border_1().border_color(background);
+        el = match dot_pop {
+            Some(at) => el.child(dot.with_animation(SharedString::from(format!("rail-dot-pop-{badge_key}-{at:?}")), Animation::new(pop_length), move |dot, t| {
+                let (scale, opacity) = juice::pop_in(pop_length.mul_f32(t), reduce);
+                let grow = 7. * (1. - scale) / 2.;
+                dot.top(px(1. + grow)).right(px(1. + grow)).size(px(7. * scale)).opacity(opacity)
+            })),
+            None => el.child(dot),
+        };
     }
     // Its key to the right while ⌘ is held (`shortcutHint(_, .after)`).
     el.children(crate::key_hints::hint(button.hint, crate::key_hints::Placement::After)).into_any_element()
@@ -327,6 +419,7 @@ impl Threadbear {
         let mut button = RailButton::new("rail-updates", "arrow.down.circle", self.updates_tooltip(), self.activity_panel_showing(shell::UPDATES, cx));
         button.dot = self.updates_dot();
         button.quiet_dot = self.updates_quiet_dot();
+        button.face = updates_face(self.next_version(), cx);
         let updates = rail_button(button, |this, _, cx| this.toggle_under_threads(shell::UPDATES, cx), cx);
         // Right-click: the app's update in a popover (updates_panel.rs).
         foot.push(self.with_update_popover(updates, window, cx));
@@ -338,6 +431,9 @@ impl Threadbear {
         let mut button = RailButton::new("rail-usage", "gauge.with.dots.needle.33percent", "Usage", usage_shown);
         button.face = Some(pot);
         button.tip = tip;
+        // A login signed out, or whose sign-in ends within days: its row in
+        // the panel says which, with Sign in… (usage.rs).
+        button.dot = threadbear_core::usage::sign_in_needed(&self.logins.accounts, crate::now_ms());
         let usage = rail_button(button, |this, _, cx| this.toggle_under_threads(shell::USAGE, cx), cx);
         let mut button = RailButton::new("rail-settings", "gearshape", "Settings", false);
         button.tip = self.shortcut_tip("Settings", ShortcutCommand::Settings);
@@ -454,7 +550,7 @@ impl Threadbear {
             let quiet = self.remote.all_runners.iter().any(|r| threadbear_core::runners::state(r) != threadbear_core::runners::State::Online);
             activity.push(json!({ "title": "Runners", "dot": false, "quietDot": quiet, "active": self.activity_panel_showing(shell::RUNNERS, cx) }));
         }
-        activity.push(json!({ "title": "Updates", "dot": self.updates_dot(), "quietDot": self.updates_quiet_dot(), "active": self.activity_panel_showing(shell::UPDATES, cx) }));
+        activity.push(json!({ "title": "Updates", "dot": self.updates_dot(), "quietDot": self.updates_quiet_dot(), "nextVersion": format!("{:?}", self.next_version()).to_lowercase(), "active": self.activity_panel_showing(shell::UPDATES, cx) }));
         let mut right = vec![];
         if let Some(thread) = self.pane_thread() {
             let project_page = self.projects.open.is_some();

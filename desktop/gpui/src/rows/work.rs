@@ -131,7 +131,7 @@ pub(crate) fn work_line(
 }
 
 impl ThreadPane {
-    fn toggle_listener(&self, row: &Row, cx: &mut Context<Self>) -> Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static> {
+    pub(super) fn toggle_listener(&self, row: &Row, cx: &mut Context<Self>) -> Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static> {
         let row = row.clone();
         Box::new(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_row(&row, cx)))
     }
@@ -269,9 +269,18 @@ impl ThreadPane {
     /// The bear and elapsed time that say a turn is running. It counts by
     /// itself once a second while it's on screen.
     pub(crate) fn working_row(&mut self, started_at: Option<f64>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // The start comes from the transcript, which a secondary runner
+        // writes for its own threads: only one this Mac could have seen
+        // counts (`juice::turn_start`; Daybreak 147).
+        let created = self.summary.created_at.as_deref().and_then(threadbear_core::inbox::parse_ms).map(|ms| ms as f64 / 1000.);
+        // An old transcript's turn, over by now (`shows_old_turn`): no
+        // count and a still paw, till it's caught up.
+        let old = self.shows_old_turn();
+        let started_at = started_at.filter(|_| !old).and_then(|s| threadbear_core::juice::turn_start(s, crate::now_ms() as f64 / 1000., created));
         self.ensure_ticking(started_at.is_some(), cx);
         let quiet = style::quiet_text(cx);
         let text = match started_at {
+            None if old => "Catching up…".to_owned(),
             Some(started) => {
                 let elapsed = (crate::now_ms() as f64 / 1000. - started).max(1.);
                 format!("Bear with me · {}", threadbear_core::reducer::duration(elapsed * 1000.))
@@ -375,11 +384,13 @@ impl ThreadPane {
 /// for the first.
 fn gap_tip(gap: &TurnGap) -> String {
     let names: Vec<String> = gap.woke_by.iter().map(|t| t.description.clone()).filter(|n| !n.is_empty()).collect();
-    if names.is_empty() {
-        "Waited between these turns".to_owned()
-    } else {
-        format!("Finished: {}", names.join(", "))
+    use threadbear_core::chrono::{Local, TimeZone as _};
+    let time = |seconds: f64| Local.timestamp_opt(seconds as i64, 0).single().map(|d| d.format(if style::uses_24_hour_clock() { "%H:%M" } else { "%-I:%M %P" }).to_string()).unwrap_or_else(|| "unknown time".into());
+    let mut tip = format!("Waited from {} to {}", time(gap.from), time(gap.to));
+    if !names.is_empty() {
+        tip.push_str(&format!("\nFinished: {}", names.join(", ")));
     }
+    tip
 }
 
 /// `statsText`: "+12 −3" in the stats font, for a diff row and a changes card.
@@ -545,3 +556,16 @@ fn clamp_lines(text: &str, count: usize) -> String {
     }
 }
 
+
+#[cfg(test)]
+mod gap_tip_tests {
+    #[test]
+    fn wait_tip_includes_both_local_times_even_without_finished_jobs() {
+        use threadbear_core::chrono::{Local, TimeZone as _};
+        let from = Local.with_ymd_and_hms(2026, 11, 14, 14, 29, 0).unwrap().timestamp() as f64;
+        let to = Local.with_ymd_and_hms(2026, 11, 14, 14, 33, 0).unwrap().timestamp() as f64;
+        let gap = threadbear_core::reducer::TurnGap { from, to, woke_by: vec![], runner_wake: None };
+        let expected = if crate::style::uses_24_hour_clock() { "Waited from 14:29 to 14:33" } else { "Waited from 2:29 pm to 2:33 pm" };
+        assert_eq!(super::gap_tip(&gap), expected);
+    }
+}

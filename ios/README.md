@@ -61,21 +61,25 @@ demo", back to pairing. It isn't remembered across launches.
 ## Pairing
 
 The phone carries a phone token (`convex/tokens.ts`), never the runner key.
-The Mac app makes one: Settings › Phone & browser › "Show the code" shows
-the pairing QR code (the runner issues the token, docs/protocol.md
-"Devices"), and the same tab lists paired phones with Revoke. By hand,
-`npx convex run tokens:issue '{"name":"iphone","days":90}'` (`--prod` for
-prod) makes one, to get onto the phone as a link:
+The Mac app pairs it: Settings › Phone & browser › "Show the code" shows
+the pairing QR code, which holds no token (Daybreak finding 127, 15 Nov
+2026). It's `TBPAIR1_` and the base64url of
+`url=<https://….convex.cloud>&code=<tbp_…>&key=<runnerId>:<key>`: not a
+link, so no app can claim it, with a code that works once for ten minutes.
+Scan the code (`PairView`) reads it and trades the code for a token with
+`tokens:claim` (docs/protocol.md "Devices"). The `key` is the runner's
+secret-box key, without which the phone pairs but won't answer secret
+cards (docs/protocol.md, "Trusting the key"). The same tab lists paired
+phones with Revoke.
 
-    threadbear://pair?url=<https://….convex.cloud>&token=<tb_…>
-
-(the Mac's code adds `&key=<runnerId>:<key>`, the runner's secret-box
-key, without which the phone pairs but won't answer secret cards;
-docs/protocol.md, "Trusting the key")
-
-shown as a QR code that Threadbear's Scan the code (or the Camera) reads. `swift ios/scripts/pair-qr.swift` does all of this, never printing the token or leaving the image on disk, or pasted from the phone's own
-clipboard ("Paste a pairing link"). Not through the Mac clipboard: Quick
-Ask's key leaked that way. The app checks the token with `phone:me` before
+By hand, `swift ios/scripts/pair-qr.swift` makes a code with `npx convex
+run tokens:issueCode` and draws it the same way, never printing it or
+leaving the image on disk. Scan it with the app's Scan the code, or paste
+it ("Paste a pairing code"). The app never takes an older
+`threadbear://pair?url=…&token=…` link, from anywhere: any app can register
+the threadbear scheme, so that token may have reached another app first.
+Not through the Mac clipboard: Quick Ask's key
+leaked that way. The app checks the token with `phone:me` before
 keeping it, in the Keychain keyed by deployment. Debug builds also take
 `http://127.0.0.1:3210`, the local `npx convex dev` backend, for the
 simulator.
@@ -111,11 +115,14 @@ follow-up is an ordinary reply there; ↗ opens it.
 - It only listens when asked (the intent or the inbox's waveform button), and
   nothing shows until a server and token are set, so App Store users without
   an archive never see it.
-- The server and token: a QR code of `threadbear://quickask?url=<server>&token=<aa_…>`,
-  or typed into Settings. The token is an archive phone token issued on
-  Bruce (agent-archive's `scripts/phone-token.mjs`, `--bruce`). Get it onto
-  the phone as a QR code, never through the Mac clipboard: Quick Ask's
-  OpenRouter key leaked that way.
+- The server and token: Settings › Ask › Scan the code, of the setup code
+  agent-archive's `npm run phone-token -- issue --bruce --qr` shows
+  (`TBASK1_…`, a one-use code good for ten minutes, never the token), which
+  the phone trades for its token at `/api/quick/claim` (`QuickAskSetup`,
+  docs/ask-server.md); or typed into Settings. Never through the Mac
+  clipboard: Quick Ask's OpenRouter key leaked that way. A
+  `threadbear://quickask` link is refused from anywhere: any app can claim
+  the scheme, so it could catch the token as the link opened.
 - Debug builds take `-QuickAskServer <url> -QuickAskToken <token>
   -QuickAskDebugQuestion "…"` (and `-quickAsk.speakAnswers NO`) to ask from
   the simulator with no mic. The simulator reaches the server through the

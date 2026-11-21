@@ -1453,6 +1453,13 @@ struct WindowSelectionState {
     #[cfg(test)]
     snapshot_visits: Cell<usize>,
     mouse_down_prepared: bool,
+    /// Threadbear's: the left button's release was seen on its way in
+    /// (capture) since the press was prepared. A click handler that stops
+    /// the release (a tab's close button) keeps it from the bubble phase,
+    /// where the press ends; the next press then finds this set and ends
+    /// the old one first, rather than taking itself for the old drag going
+    /// on (a link clicked next did nothing, 19 Nov 2026).
+    released_unseen: bool,
     auto_scroll: AutoScroll,
     /// Where the anchor's text was when the last synthetic wheel went out,
     /// and how many went out without moving it. A container at its end
@@ -2957,6 +2964,32 @@ fn with_text_selection_scope<T>(
 pub struct TextSelection;
 
 impl TextSelection {
+    /// The word actually drawn under this point in the active selection
+    /// scope. It neither changes selection nor reads clipped or hidden text.
+    pub fn word_at(position: Point<Pixels>, window: &Window, cx: &mut App) -> Option<String> {
+        let state = live_text_selection_state(window, cx)?;
+        state.update(cx, |state, cx| {
+            let endpoint = state.endpoint(position, Some(window), cx);
+            if !endpoint.inside_text { return None }
+            let participant = endpoint.participant?.upgrade()?;
+            let participant = participant.read(cx);
+            let runs = participant.runs.borrow();
+            let run = runs.iter().find(|run| run.bounds.contains(&position))?;
+            if run.text.len() != run.layout.len() { return None }
+            let offset = run.layout.index_for_position(position).ok()?;
+            let range = word_range_at(&run.text, offset)?;
+            let word = run.text.get(range)?;
+            (!word.trim().is_empty()).then(|| word.to_owned())
+        })
+    }
+
+    /// The visible end of the current geometry selection, for a system
+    /// definition popover. Participant-local select-all can have no endpoint.
+    pub fn selection_cursor(window: &Window, cx: &mut App) -> Option<Point<Pixels>> {
+        let state = live_text_selection_state(window, cx)?;
+        state.read(cx).snapshot()?.window_points().map(|points| points.cursor())
+    }
+
     /// Returns whether `position` hits selectable text in the active scope.
     ///
     /// Uses the current frame's registered text geometry and hitboxes without
@@ -3423,10 +3456,15 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
             GlobalState::init(cx);
             GlobalState::reset_text_selection_suppression(cx);
             let handlers = state.update(cx, |state, cx| {
+                if state.mouse_down_prepared && state.released_unseen {
+                    state.mouse_down_prepared = false;
+                    state.end(cx);
+                }
                 if state.mouse_down_prepared {
                     return Vec::new();
                 }
                 state.mouse_down_prepared = true;
+                state.released_unseen = false;
                 state.prepare_for_mouse_down(event.click_count == 1 && event.modifiers.shift, cx)
             });
             dispatch_clear_handlers(handlers, cx);
@@ -3585,6 +3623,33 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
         }
     });
 
+    // Any button's, as the bubble listener below ends the press on any: a
+    // left press let go with Control held can come back as a right release.
+    let release_state = state.downgrade();
+    window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+        if phase.capture()
+            && let Some(state) = release_state.upgrade()
+        {
+            state.update(cx, |state, _| state.released_unseen = state.mouse_down_prepared);
+        }
+    });
+    // A release that never reached the bubble phase is over by the next
+    // move, before the move could stretch the old selection over whatever
+    // the pointer passes (drawn, and copied by Command-C).
+    let stale_state = state.downgrade();
+    window.on_mouse_event(move |_: &MouseMoveEvent, phase, _, cx| {
+        if phase.capture()
+            && let Some(state) = stale_state.upgrade()
+            && state.read(cx).released_unseen
+        {
+            state.update(cx, |state, cx| {
+                state.mouse_down_prepared = false;
+                state.released_unseen = false;
+                state.end(cx);
+            });
+        }
+    });
+
     let mouse_up_state = state.downgrade();
     window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
         if phase.bubble()
@@ -3592,6 +3657,7 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
         {
             state.update(cx, |state, cx| {
                 state.mouse_down_prepared = false;
+                state.released_unseen = false;
                 state.end(cx)
             });
         }

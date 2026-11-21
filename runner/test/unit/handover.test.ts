@@ -5,9 +5,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { openCardEvents, phoneCommands, primaryRemote, ThreadRouter } from '../../src/handover.ts';
+import { openCardEvents, phoneCommands, primaryRemote, runnerAlive, ThreadRouter } from '../../src/handover.ts';
 import type { PersistedEvent } from '../../src/protocol.ts';
 import { FakeAccounts, FakeAdapter, makeHarness, testConfig, tick, type Harness } from '../helpers/fakes.ts';
+import { skipOnWindows } from '../helpers/platform.ts';
 import { Runner, SAVE_RETRY_MS, type Notification } from '../../src/runner.ts';
 import { ThreadStore } from '../../src/store.ts';
 import { FakeClock } from '../../src/clock.ts';
@@ -133,7 +134,7 @@ test('a message to a thread that background work is holding starts at once on th
   const handed: string[] = [];
   await h.runner.beginDrain([t.id], { onHandedOver: (id) => handed.push(id), backgroundMs: 30 * MIN });
   assert.deepEqual(handed, []);
-  // Waiting for the work to end could take half an hour, with Mike's answer
+  // Waiting for the work to end could take half an hour, with Alex's answer
   // unread and his card still open.
   h.runner.send(t.id, 'how did it go?');
   assert.equal(s.sent.length, 2);
@@ -530,13 +531,17 @@ test("the phone's commands reach a thread a draining runner still has", async ()
   await host.update({ threadId: busy.id, archived: true });
   await host.respondApproval({ threadId: busy.id, approvalId: 'a1', decision: 'allow' });
   await host.share(busy.id, { access: 'link' });
-  assert.deepEqual(sent.map(([m]) => m), ['threads.send', 'threads.markSeen', 'threads.update', 'approvals.respond', 'threads.share']);
+  await host.listReviews!(busy.id);
+  await host.getReview!(busy.id, 'review-id');
+  await host.respondReview!(busy.id, 'review-id', 2, { pickedId: 'A', notes: {} });
+  assert.deepEqual(sent.map(([m]) => m), ['threads.send', 'threads.markSeen', 'threads.update', 'approvals.respond', 'threads.share', 'reviews.list', 'reviews.get', 'reviews.respond']);
+  assert.deepEqual(sent[7][1], { threadId: busy.id, reviewId: 'review-id', revision: 2, draft: { pickedId: 'A', notes: {} } });
   assert.deepEqual(sent[0][1], { threadId: busy.id, text: 'from my phone', origin: 'phone' });
   assert.ok((sent[1][1].seq as number) >= Number.MAX_SAFE_INTEGER, 'seen up to whatever it has');
   // The primary's own threads are done here.
   await host.update({ threadId: idle.id, title: 'Renamed' });
   assert.equal(b.runner.get(idle.id).title, 'Renamed');
-  assert.equal(sent.length, 5);
+  assert.equal(sent.length, 8);
   // Handed over just as the command went: done here instead.
   moved = true;
   await host.update({ threadId: busy.id, title: 'Came across' });
@@ -580,7 +585,7 @@ test('Peers: the bearer header goes only to a draining runner whose own drain fi
   peers.close();
 });
 
-test('connectDrain: the bearer header goes only over a socket whose other end is the draining runner itself', async () => {
+test('connectDrain: the bearer header goes only over a socket whose other end is the draining runner itself', skipOnWindows("a handover finds a socket's owner with lsof, which Windows hasn't got"), async () => {
   const { connectDrain, socketOwnedBy } = await import('../../src/handover.ts');
   const { WebSocketServer } = await import('ws');
   const { spawn } = await import('node:child_process');
@@ -722,7 +727,7 @@ test("Peers: a thread that can't be taken in stays arriving, and one being hande
 
 // docs/protocol.md, "Who stopped it": his Stop on the phone says so; an agent's
 // interrupt_thread, which goes through the router, doesn't.
-test("only the phone's Stop counts as Mike's, not an agent's interrupt_thread", async () => {
+test("only the phone's Stop counts as Alex's, not an agent's interrupt_thread", async () => {
   const h = makeHarness();
   const ask = () => {
     const { thread } = h.runner.create({ text: 'go', cwd: h.cfg.defaults.cwd, accountId: 'claude-3', permissionMode: 'ask' });
@@ -878,7 +883,7 @@ test('an idle thread hibernating in words is kept by a drain that was not asked 
 // runner's tools left other runners' threads out.
 test('primaryRemote: a draining runner reaches other runners\' threads through the primary', async () => {
   const calls: Array<[string, Record<string, unknown>]> = [];
-  const rows = { runners: [{ id: 'cloud', name: 'Hetzner Cloud', online: true, lastSeenAt: '' }], threads: [{ threadId: 'ba5bb5ec-1', runnerId: 'cloud', title: 'Rust port' }] };
+  const rows = { runners: [{ id: 'cloud', name: 'Cloud box', online: true, lastSeenAt: '' }], threads: [{ threadId: 'ba5bb5ec-1', runnerId: 'cloud', title: 'Rust port' }] };
   const link = {
     call: async <T,>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
       calls.push([method, params]);
@@ -1106,4 +1111,16 @@ test("Peers.openCards: a draining runner from the morning of 13 Nov, answering e
   assert.equal(openCardsAnswer({ threads: [] }, 'm3'), undefined);
   assert.equal(openCardsAnswer(null, 'x'), undefined);
   assert.equal(openCardsAnswer({ events: 'no' }, 'x'), undefined);
+});
+
+// Windows' processInfo has only the program's name, never main.ts: a
+// draining runner there was always taken for gone and left running (18 Nov).
+test('runnerAlive knows a runner on Windows by its program alone', () => {
+  const info = (command: string) => ({ pgid: 1, lstart: '1', command });
+  assert.equal(runnerAlive(1, info('node'), true), true);
+  assert.equal(runnerAlive(1, info('node.exe'), true), true);
+  assert.equal(runnerAlive(1, info('claude'), true), false);
+  assert.equal(runnerAlive(1, null, true), false);
+  assert.equal(runnerAlive(1, info('node /x/releases/r/src/main.ts'), false), true);
+  assert.equal(runnerAlive(1, info('node'), false), false);
 });

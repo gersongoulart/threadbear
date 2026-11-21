@@ -57,7 +57,7 @@ impl FileLinkAction {
     /// in ("Xcode"), for "Open in Xcode".
     pub fn title(self, app: Option<&str>) -> String {
         match self {
-            FileLinkAction::Automatic => "Panel for Docs and Pictures, App for the Rest".to_owned(),
+            FileLinkAction::Automatic => "Panel for Docs, Code and Pictures, App for the Rest".to_owned(),
             FileLinkAction::Panel => "Open in Panel".to_owned(),
             FileLinkAction::App => app.map_or_else(|| "Open in Default App".to_owned(), |name| format!("Open in {name}")),
             FileLinkAction::Finder => finder_title().to_owned(),
@@ -75,9 +75,9 @@ impl FileLinkAction {
         chosen
     }
 
-    /// Automatic made definite for one file: the kinds Mike reviews rather
-    /// than edits (docs, pictures, pages) and folders in the pane, the rest
-    /// in its app (`openTranscriptFile`).
+    /// Automatic made definite for one file: the kinds the pane draws (docs,
+    /// pictures, pages, text, data and code) and folders in the pane, the
+    /// rest in its app (`openTranscriptFile`).
     pub fn resolved(self, path: &str, is_folder: bool) -> FileLinkAction {
         match self {
             FileLinkAction::Automatic if is_folder || highlights::previews_in_pane(path) => FileLinkAction::Panel,
@@ -324,11 +324,10 @@ pub fn page_peek(url: &str, words: &str) -> PeekWords {
 /// does. `away` names another Mac whose file it is.
 pub fn file_peek(path: &str, exists: bool, away: Option<&str>, home: &str) -> PeekWords {
     let name = highlights::last_component(path).to_owned();
-    let parent = path.trim_end_matches('/').rsplit_once('/').map_or("", |(dir, _)| if dir.is_empty() { "/" } else { dir });
-    let detail = match parent.strip_prefix(home.trim_end_matches('/')) {
-        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => format!("~{rest}"),
-        _ => parent.to_owned(),
-    };
+    let trimmed = path.trim_end_matches('/');
+    let split = if crate::reducer::text::is_windows_path(trimmed) { trimmed.rsplit_once(['/', '\\']) } else { trimmed.rsplit_once('/') };
+    let parent = split.map_or("", |(dir, _)| if dir.is_empty() { "/" } else { dir });
+    let detail = crate::new_thread::abbreviate_home(parent, home);
     let footer = match (exists, away) {
         (true, _) => "Click to open".to_owned(),
         (false, Some(away)) => format!("On {away}. Click to open."),
@@ -397,10 +396,12 @@ mod tests {
         assert_eq!(FileLinkAction::for_click(true, false, false, FileLinkAction::Panel), FileLinkAction::App, "⌘ always means its app");
         assert_eq!(FileLinkAction::for_click(false, false, true, FileLinkAction::Panel), FileLinkAction::App, "a project file goes to its app");
         assert_eq!(FileLinkAction::for_click(false, true, true, FileLinkAction::Panel), FileLinkAction::Panel, "another Mac's copy has none of its media");
-        // Automatic made definite: docs and pictures in the pane, code in its app.
+        // Automatic made definite: docs, code and pictures in the pane, the rest in its app.
         assert_eq!(FileLinkAction::Automatic.resolved("/w/notes.md", false), FileLinkAction::Panel);
         assert_eq!(FileLinkAction::Automatic.resolved("/w/shot.PNG", false), FileLinkAction::Panel);
-        assert_eq!(FileLinkAction::Automatic.resolved("/w/main.rs", false), FileLinkAction::App);
+        assert_eq!(FileLinkAction::Automatic.resolved("/w/main.rs", false), FileLinkAction::Panel);
+        assert_eq!(FileLinkAction::Automatic.resolved("/w/put-1.json", false), FileLinkAction::Panel);
+        assert_eq!(FileLinkAction::Automatic.resolved("/w/build.zip", false), FileLinkAction::App);
         assert_eq!(FileLinkAction::Automatic.resolved("/w/src", true), FileLinkAction::Panel, "a folder is browsed in the pane");
         assert_eq!(FileLinkAction::Finder.resolved("/w/notes.md", false), FileLinkAction::Finder);
         assert_eq!(WebLinkAction::for_click(true, WebLinkAction::Panel), WebLinkAction::Browser);
@@ -425,7 +426,7 @@ mod tests {
         let LinkMenuEntry::Defaults { choices } = menu.last().unwrap() else { panic!() };
         let named: Vec<(&str, bool)> = choices.iter().map(|(t, _, _, on)| (t.as_str(), *on)).collect();
         // Default App, not this file's app: the choice is for every file link.
-        assert_eq!(named, [("Panel for Docs and Pictures, App for the Rest", false), ("Open in Panel", true), ("Open in Default App", false), (finder_title(), false)]);
+        assert_eq!(named, [("Panel for Docs, Code and Pictures, App for the Rest", false), ("Open in Panel", true), ("Open in Default App", false), (finder_title(), false)]);
         assert_eq!(file_link_menu(false, None, FileLinkAction::Automatic).iter().map(LinkMenuEntry::title).collect::<Vec<_>>(), ["Couldn't Find This File"]);
         // With no app found for it.
         assert_eq!(file_link_menu(true, None, FileLinkAction::Automatic)[1].title(), "Open in Default App");
@@ -436,11 +437,11 @@ mod tests {
         let titles = |menu: Vec<LinkMenuEntry>| menu.iter().map(|e| e.title().to_owned()).collect::<Vec<_>>();
         assert_eq!(titles(web_link_menu(Some("Safari"), &[], WebLinkAction::Browser)), ["Open in Safari", "Open in Panel", "---", "Copy Link", "---", "Default"]);
         let profiles = vec![
-            ChromeProfile { directory: "Default".into(), name: "Mike".into(), picture: None },
-            ChromeProfile { directory: "Profile 5".into(), name: "convex.dev".into(), picture: None },
+            ChromeProfile { directory: "Default".into(), name: "Alex".into(), picture: None },
+            ChromeProfile { directory: "Profile 5".into(), name: "Work".into(), picture: None },
         ];
         let menu = web_link_menu(Some("Google Chrome"), &profiles, WebLinkAction::Panel);
-        assert_eq!(titles(menu.clone()), ["Open in Chrome: Mike", "Open in Chrome: convex.dev", "Open in Panel", "---", "Copy Link", "---", "Default"]);
+        assert_eq!(titles(menu.clone()), ["Open in Chrome: Alex", "Open in Chrome: Work", "Open in Panel", "---", "Copy Link", "---", "Default"]);
         assert!(matches!(&menu[1], LinkMenuEntry::Item { choice: LinkChoice::OpenInProfile(1), .. }));
         let LinkMenuEntry::Defaults { choices } = menu.last().unwrap() else { panic!() };
         assert_eq!(choices.iter().map(|(t, _, _, on)| (t.as_str(), *on)).collect::<Vec<_>>(), [("Open in Google Chrome", false), ("Open in Panel", true)]);
@@ -451,7 +452,7 @@ mod tests {
     fn chromes_open_profiles_come_from_its_local_state_in_its_order() {
         let folder = Path::new("/Chrome");
         let state = r#"{"profile":{"last_active_profiles":["Profile 5","Default","Gone"],"info_cache":{
-            "Default":{"name":"Mike","gaia_picture_file_name":"Google Profile Picture.png"},
+            "Default":{"name":"Alex","gaia_picture_file_name":"Google Profile Picture.png"},
             "Profile 5":{"name":"","gaia_picture_file_name":""},
             "Profile 9":{"name":"Closed"}}}}"#;
         let exists = |p: &Path| p == Path::new("/Chrome/Default/Google Profile Picture.png");
@@ -459,7 +460,7 @@ mod tests {
         assert_eq!(profiles.len(), 2, "a profile Chrome no longer has is left out");
         assert_eq!((profiles[0].directory.as_str(), profiles[0].name.as_str(), profiles[0].picture.is_none()), ("Profile 5", "Profile 5", true), "no name: its folder's");
         assert_eq!(profiles[1].picture.as_deref(), Some(Path::new("/Chrome/Default/Google Profile Picture.png")));
-        assert_eq!(profiles[1].title(), "Open in Chrome: Mike");
+        assert_eq!(profiles[1].title(), "Open in Chrome: Alex");
         assert!(chrome_profiles("not json", folder, &exists).is_empty());
         assert!(chrome_profiles(r#"{"profile":{}}"#, folder, &exists).is_empty());
         // Offered only with more than one, and Chrome the browser in use.
@@ -470,8 +471,8 @@ mod tests {
 
     #[test]
     fn a_pages_card_is_titled_by_its_words_unless_theyre_its_address() {
-        let card = page_peek("https://github.com/mikecann/threadbear/pull/12", "the PR");
-        assert_eq!((card.title.as_str(), card.detail.as_str(), card.footer.as_str()), ("the PR", "github.com/mikecann/threadbear/pull/12", "Click to open"));
+        let card = page_peek("https://github.com/alex-example/threadbear/pull/12", "the PR");
+        assert_eq!((card.title.as_str(), card.detail.as_str(), card.footer.as_str()), ("the PR", "github.com/alex-example/threadbear/pull/12", "Click to open"));
         assert_eq!(page_peek("https://www.example.com/a", "example.com/a").title, "www.example.com");
         assert_eq!(page_peek("https://example.com/a", "https://example.com/a").title, "example.com");
         assert_eq!(page_peek("https://example.com/", "").detail, "example.com");
@@ -479,12 +480,12 @@ mod tests {
 
     #[test]
     fn a_files_card_names_it_its_folder_and_whether_its_here() {
-        let card = file_peek("/Users/mike/dev/app/docs/plan.md", true, None, "/Users/mike");
+        let card = file_peek("/Users/alex/dev/app/docs/plan.md", true, None, "/Users/alex");
         assert_eq!((card.title.as_str(), card.detail.as_str(), card.footer.as_str()), ("plan.md", "~/dev/app/docs", "Click to open"));
-        assert_eq!(file_peek("/tmp/a.png", false, None, "/Users/mike").footer, "Not found on this Mac");
-        assert_eq!(file_peek("/Users/mike/a.png", false, Some("bruce"), "/Users/mike").footer, "On bruce. Click to open.");
-        assert_eq!(file_peek("/Users/mike/a.png", true, None, "/Users/mike").detail, "~");
-        assert_eq!(file_peek("/Users/mikey/a.png", true, None, "/Users/mike").detail, "/Users/mikey", "not home, just a name like it");
+        assert_eq!(file_peek("/tmp/a.png", false, None, "/Users/alex").footer, "Not found on this Mac");
+        assert_eq!(file_peek("/Users/alex/a.png", false, Some("mac-mini"), "/Users/alex").footer, "On mac-mini. Click to open.");
+        assert_eq!(file_peek("/Users/alex/a.png", true, None, "/Users/alex").detail, "~");
+        assert_eq!(file_peek("/Users/alexa/a.png", true, None, "/Users/alex").detail, "/Users/alexa", "not home, just a name like it");
         assert_eq!(file_peek("/a.png", true, None, "").detail, "/");
     }
 

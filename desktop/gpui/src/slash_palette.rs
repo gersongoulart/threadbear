@@ -122,6 +122,7 @@ struct PaletteView {
     query: String,
     recent: Vec<String>,
     provider: String,
+    cli_name: String,
     /// `paletteCurrent`: what /model and /effort would change, as it is now.
     current: HashMap<String, String>,
     /// Its command files are this Mac's to open only on this Mac's threads.
@@ -130,6 +131,16 @@ struct PaletteView {
     /// Typed partway through a message: only the skills the agent can run
     /// there are listed, and a pick goes into the words (Insert), never sent.
     mid_message: bool,
+}
+
+impl PaletteView {
+    fn category_title(&self, category: slash::Category) -> String {
+        if category == slash::Category::Cli { self.cli_name.clone() } else { category.title(&self.provider) }
+    }
+
+    fn category_tip(&self, category: slash::Category) -> String {
+        if category == slash::Category::Cli { format!("{}'s own commands", self.cli_name) } else { category.tip(&self.provider) }
+    }
 }
 
 impl Composer {
@@ -277,7 +288,8 @@ impl Composer {
             }
         }
         let can_open_files = data.away.is_none();
-        PaletteView { all, loading, query, recent, provider, current, can_open_files, home: std::env::var("HOME").unwrap_or_default(), mid_message }
+        let cli_name = data.logins.cli_name(&provider);
+        PaletteView { all, loading, query, recent, provider, cli_name, current, can_open_files, home: std::env::var("HOME").unwrap_or_default(), mid_message }
     }
 
     /// The palette's layer over the box, or None while it's closed.
@@ -299,24 +311,33 @@ impl Composer {
         let list = self.render_palette_list(&view, &matches, picked.as_ref(), cx);
         let detail = self.render_palette_detail(&view, picked.as_ref(), cx);
         // Its size: what it was dragged to, kept within the window, else as
-        // wide as the box and about half the window tall (slash_resize.rs).
-        // In points, as kept; the window's are zoomed.
-        let zoom = style::zoomed(1.);
+        // wide as the box (480 at least) and about half the window tall
+        // (slash_resize.rs).
+        // In points, as kept; the window's are zoomed. The plain scale, not
+        // `zoomed(1.)`: that rounds to 1 from 80% to 140%, so at 125% the
+        // window counted as a quarter taller than it is and the palette ran
+        // off its top.
+        let zoom = style::zoom_scale();
         let viewport = window.viewport_size();
         let layout = crate::slash_resize::kept(self, cx);
         let auto_height = slash::palette_height(f64::from(viewport.height / zoom), 300., 560.);
         let (width, height) = crate::slash_resize::size(layout, f64::from(self.card_width.get() / zoom), size(viewport.width / zoom, viewport.height / zoom), auto_height);
         // No taller than the room over the box, so it doesn't run off the
-        // top of the window where the box sits high up (the new-thread page).
+        // top of the window where the box sits high up (the new-thread page),
+        // even where that's under its usual least (a short window zoomed in):
+        // shorter beats cut off.
         let room = f64::from(self.box_top.get() / zoom) - 8. - 8.;
-        let height = if room > 0. { height.min(room.max(160.)) } else { height };
+        let height = height.min(room.max(0.));
         // Each column as wide as its longest entry needs, or as it was
         // dragged to, the description the rest; measured over every command,
         // not just the matches, so the columns hold still while typing
         // (SlashPalette.columnWidths).
         let categories_natural = layout.categories.unwrap_or_else(|| categories_natural_width(&view));
         let list_natural = layout.list.unwrap_or_else(|| list_natural_width(&view.all));
-        let (categories_width, list_width) = slash::column_widths(width, categories_natural, list_natural, layout.list.is_some(), 200., 120., 110.);
+        // Shared out over what's inside its edge and the two lines between
+        // the columns, so the detail really gets its 200.
+        let inner = width - crate::slash_resize::CHROME;
+        let (categories_width, list_width) = slash::column_widths(inner, categories_natural, list_natural, layout.list.is_some(), 200., 120., 110.);
         crate::slash_resize::drawn_as((width, height), (categories_width, list_width));
         let hairline = style::hairline(cx);
         let composer = cx.entity().downgrade();
@@ -335,10 +356,11 @@ impl Composer {
             // Keep clicks out of the transcript under it.
             .occlude()
             .child(div().flex_none().w(px(categories_width as f32)).h_full().child(categories))
-            .child(crate::slash_resize::column_rule(0, categories_width, list_width + 200., width, cx))
+            .child(crate::slash_resize::column_rule(0, categories_width, list_width + 200., inner, cx))
             .child(div().flex_none().w(px(list_width as f32)).h_full().child(list))
-            .child(crate::slash_resize::column_rule(1, list_width, categories_width + 200., width, cx))
-            .child(div().flex_1().min_w_0().h_full().child(detail))
+            .child(crate::slash_resize::column_rule(1, list_width, categories_width + 200., inner, cx))
+            .child(div().relative().flex_1().min_w_0().h_full().child(detail).child(crate::slash_resize::measure_detail()))
+            .child(crate::slash_resize::measure_palette())
             // Its edges drag it bigger; a right-click anywhere on it puts it back.
             .children(crate::slash_resize::edges((width, height), cx))
             .context_menu(move |menu, _, _| crate::slash_resize::menu(menu_composer.clone(), menu));
@@ -368,8 +390,8 @@ impl Composer {
         let mut column = v_flex().p(px(8.)).gap(px(2.));
         for (category, count) in counts {
             let on = self.palette.category == category;
-            let tip: SharedString = category.tip(&view.provider).into();
-            let title = category.title(&view.provider);
+            let tip: SharedString = view.category_tip(category).into();
+            let title = view.category_title(category);
             let (fg, muted) = (cx.theme().foreground, cx.theme().muted_foreground);
             let hover = style::primary_opacity(cx, 0.05);
             column = column.child(
@@ -477,7 +499,7 @@ impl Composer {
         if let Some(aliases) = command.aliases.as_ref().filter(|a| !a.is_empty()) {
             words = words.child(div().text_size(px(size::LABEL)).text_color(style::secondary_text(cx)).child(format!("Also {}", aliases.iter().map(|a| format!("/{a}")).collect::<Vec<_>>().join(", "))));
         }
-        let origin = v_flex().gap(px(3.)).child(div().text_size(px(size::LABEL)).text_color(style::tertiary_label(cx)).child(slash::origin(command, &view.provider))).when_some(command.path.clone(), |s, path| {
+        let origin = v_flex().gap(px(3.)).child(div().text_size(px(size::LABEL)).text_color(style::tertiary_label(cx)).child(slash::origin_named(command, &view.cli_name))).when_some(command.path.clone(), |s, path| {
             s.child(div().text_size(px(size::LABEL - 1.)).font_family(cx.theme().mono_font_family.clone()).text_color(style::tertiary_label(cx)).child(slash::short_path(&path, &view.home)))
         });
         words = words.child(origin);
@@ -536,7 +558,7 @@ impl Composer {
         let query = view.query.clone();
         let matches = slash::matches(&view.all, &query, self.palette.category, &view.recent);
         let picked = slash::picked(&matches, &self.palette).cloned();
-        let categories: Vec<Value> = slash::counts(&view.all, &query, &view.recent).into_iter().map(|(c, n)| json!({ "title": c.title(&view.provider), "count": n })).collect();
+        let categories: Vec<Value> = slash::counts(&view.all, &query, &view.recent).into_iter().map(|(c, n)| json!({ "title": view.category_title(c), "count": n })).collect();
         let note = if view.loading { Some("Getting this thread's commands…".to_owned()) } else if matches.is_empty() { Some(if query.is_empty() { "Nothing here yet.".to_owned() } else { format!("No command matches /{query}. Send it and it goes to the agent as words.") }) } else { None };
         let detail = picked.as_ref().map(|c| {
             let mut buttons = if view.mid_message { vec!["Insert"] } else { vec!["Run", "Add details"] };
@@ -549,14 +571,14 @@ impl Composer {
                 "description": c.description.clone().filter(|d| !d.is_empty()),
                 "now": view.current.get(&c.name),
                 "also": c.aliases.as_ref().filter(|a| !a.is_empty()).map(|a| format!("Also {}", a.iter().map(|x| format!("/{x}")).collect::<Vec<_>>().join(", "))),
-                "origin": slash::origin(c, &view.provider),
+                "origin": slash::origin_named(c, &view.cli_name),
                 "path": c.path.as_ref().map(|p| slash::short_path(p, &view.home)),
                 "buttons": buttons,
             })
         });
         json!({
             "query": query,
-            "category": self.palette.category.title(&view.provider),
+            "category": view.category_title(self.palette.category),
             "categories": categories,
             "commands": matches.iter().map(|c| format!("/{}", c.name)).collect::<Vec<_>>(),
             "picked": picked.map(|c| format!("/{}", c.name)),
@@ -566,6 +588,12 @@ impl Composer {
             // height, and its categories' and list's widths.
             "size": crate::slash_resize::drawn().map(|d| [d[0], d[1]]),
             "columns": crate::slash_resize::drawn().map(|d| [d[2], d[3]]),
+            // Where it was drawn (x, y, width, height) and the window's
+            // size, in the window's points, and how wide its detail column
+            // came out.
+            "frame": crate::slash_resize::drawn_frame().map(|f| f.0),
+            "window": crate::slash_resize::drawn_frame().map(|f| f.1),
+            "detailWidth": crate::slash_resize::drawn_frame().map(|f| f.2),
         })
     }
 }
@@ -608,6 +636,6 @@ fn list_natural_width(commands: &[SlashCommand]) -> f64 {
 
 /// `SlashPaletteView.categoriesWidth`: the longest title beside its count.
 fn categories_natural_width(view: &PaletteView) -> f64 {
-    let longest = slash::counts(&view.all, "", &view.recent).iter().map(|(c, n)| text_width(&c.title(&view.provider)) + text_width(&n.to_string())).fold(0., f64::max);
+    let longest = slash::counts(&view.all, "", &view.recent).iter().map(|(c, n)| text_width(&view.category_title(*c)) + text_width(&n.to_string())).fold(0., f64::max);
     longest + 10. * 2. + 8. * 2. + 14.
 }

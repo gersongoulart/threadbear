@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { PersistedEvent } from '../../src/protocol.ts';
-import { offersToTakeItBack, TRY_IT_FIRST, archiveFromTool, snoozeFromTool, bylineFromTool, endedThisTurn, CODEX_END_TURN_DESCRIPTION, CODEX_ONE_REPLY_DESCRIPTION, END_TURN_DESCRIPTION, END_TURN_FULL_NAME, endTurnDescription, needsFromText, needsFromTool, ONE_REPLY_DESCRIPTION, replyAsks, replyAsksNudge, replyWithoutRepeat, splitReplySection, summaryFromTool, summaryMarkdown, turnReply } from '../../src/needs.ts';
+import { AGENT_MESSAGE_PREFIX } from '../../src/protocol.ts';
+import { handsOverAStep, offersToTakeItBack, PLAIN_CARD_NUDGE, plainCardNudge, wantsPlainCard, TRY_IT_FIRST, tryFirstNudge, archiveFromTool, snoozeFromTool, bylineFromTool, endedThisTurn, CODEX_END_TURN_DESCRIPTION, CODEX_ONE_REPLY_DESCRIPTION, END_TURN_DESCRIPTION, END_TURN_FULL_NAME, endTurnDescription, needsFromText, needsFromTool, ONE_REPLY_DESCRIPTION, replyAsks, replyAsksNudge, replyWithoutRepeat, splitReplySection, summaryFromTool, summaryMarkdown, turnReply, unansweredItems } from '../../src/needs.ts';
 import { END_TURN_TOOL } from '../../src/needs.ts';
 import { SERVER_NAME } from '../../src/threadbear-mcp.ts';
 import { ClaudeNormalizer, fileContext } from '../../src/adapters/claude/normalize.ts';
@@ -31,9 +32,9 @@ test('end_turn input: nothing, you with asks, and junk falls back', () => {
 
 test('end_turn input: next steps go with needs nothing only', () => {
   // Mike, 30 Oct: follow-ups in the prose got lost under a done card.
-  assert.deepEqual(needsFromTool({ needs: 'nothing', next: [' Show Bruce pictures ', '', 7, 'Show Bruce pictures', 'Start Bruce threads'] }), {
+  assert.deepEqual(needsFromTool({ needs: 'nothing', next: [' Show Mac mini pictures ', '', 7, 'Show Mac mini pictures', 'Start Mac mini threads'] }), {
     needs: 'nothing',
-    next: ['Show Bruce pictures', 'Start Bruce threads'],
+    next: ['Show Mac mini pictures', 'Start Mac mini threads'],
   });
   assert.deepEqual(needsFromTool({ summary: ['Done.'], next: ['Do the next bit'] }), { needs: 'nothing', next: ['Do the next bit'] });
   assert.equal(needsFromTool({ needs: 'nothing', next: ['a', 'b', 'c', 'd'] })!.next!.length, 3);
@@ -80,6 +81,31 @@ test('end_turn input: a decision keeps its why, options and a valid pick', () =>
   assert.deepEqual(needsFromTool({ needs: 'you', asks: [{ action: 'a', options: ['x'], suggested: 4 }] })!.asks, [{ action: 'a', options: ['x'] }]);
   assert.deepEqual(needsFromTool({ needs: 'you', asks: [{ action: 'a', options: [], suggested: 0 }] })!.asks, [{ action: 'a' }]);
   assert.equal(needsFromTool({ needs: 'you', asks: [{ action: 'a', options: Array.from({ length: 9 }, (_, i) => `o${i}`) }] })!.asks![0].options!.length, 6);
+});
+
+// Thread 95e13589, 17 Nov 2026: an older-form ask listed its two options in
+// why, in the other order, with "(my pick)" on one, as well as giving them as
+// buttons, and the card showed the list instead of notes under the buttons.
+test('end_turn input: a why that lists the options again becomes their notes', () => {
+  const why = 'Right now a release only reaches followers. Should an admin be able to announce it to everyone?\n- Followers only (simplest)\n- Followers by default, with an "announce to everyone" switch per release (my pick)';
+  assert.deepEqual(needsFromTool({ needs: 'you', asks: [{ action: 'Decide who sees a release.', why, options: ['Add an announce switch', 'Followers only'], suggested: 0 }] })!.asks, [
+    {
+      action: 'Decide who sees a release.',
+      why: 'Right now a release only reaches followers. Should an admin be able to announce it to everyone?',
+      options: ['Add an announce switch', 'Followers only'],
+      optionNotes: ['Followers by default, with an "announce to everyone" switch per release', 'Followers only (simplest)'],
+      suggested: 0,
+    },
+  ]);
+  // Several questions, or a list that doesn't match the buttons one for
+  // one, stays in the text.
+  const questions = 'Two things:\n- Which region?\n- How many replicas?';
+  assert.equal(needsFromTool({ needs: 'you', asks: [{ action: 'a', why: questions, options: ['Sydney', 'Tokyo'] }] })!.asks![0].why, questions);
+  const three = 'Pick one:\n- Merge it\n- Test it\n- Close it';
+  assert.equal(needsFromTool({ needs: 'you', asks: [{ action: 'a', why: three, options: ['Merge', 'Test'] }] })!.asks![0].why, three);
+  // Notes the agent gave itself win.
+  const own = needsFromTool({ needs: 'you', asks: [{ question: 'Merge it?\n- Merge now\n- Test first', options: [{ label: 'Merge', does: 'I merge' }, { label: 'Test' }] }] })!.asks![0];
+  assert.deepEqual(own.optionNotes, ['I merge', '']);
 });
 
 test('end_turn input: links to go and do the thing, web or local, a few at most', () => {
@@ -158,15 +184,15 @@ test('the section: follow-ups listed after "nothing needed" are the done card\'s
     '',
     'So everything from this thread is now live:',
     '- **On your Mac:** the app records calls again.',
-    '- **On Bruce:** new calls get their speakers labelled by Nemotron 3 Diarization.',
+    '- **On Mac mini:** new calls get their speakers labelled by Nemotron 3 Diarization.',
     '',
     'Nothing needed from you right now; the work is finished. Two follow-ups are worth doing:',
-    "- **Check your next call:** confirm Bruce actually used Nemotron on it. Its background service is the one setup I couldn't test before deploying.",
+    "- **Check your next call:** confirm Mac mini actually used Nemotron on it. Its background service is the one setup I couldn't test before deploying.",
     '- **Try a bigger Whisper model:** the transcribed words are now the weaker part of the notes.',
   ].join('\n');
   assert.deepEqual(needsFromText(text), {
     needs: 'nothing',
-    next: ['Check your next call: confirm Bruce actually used Nemotron on it', 'Try a bigger Whisper model: the transcribed words are now the weaker part of the notes'],
+    next: ['Check your next call: confirm Mac mini actually used Nemotron on it', 'Try a bigger Whisper model: the transcribed words are now the weaker part of the notes'],
   });
   // A line of lead-in, a cap of three, and long ones cut at a word.
   const many = ['Nothing needed from you right now.', '', 'Worth doing next:', '', '1. One', '2. Two', '3. Three', '4. Four'].join('\n');
@@ -275,7 +301,7 @@ test("turnReply: the thread's own tools after the message don't count as work, n
   assert.deepEqual(turnReply(log(user(), started, call('b1', 'Bash'), text('Started the build; back when it finishes.'), call('e1', END))), { landed: true, replied: true });
 });
 
-test('turnReply: only the current turn counts, and a message from Mike mid-turn wants a reply of its own', () => {
+test('turnReply: only the current turn counts, and a message from Alex mid-turn wants a reply of its own', () => {
   // Last turn's answer doesn't carry over.
   assert.deepEqual(turnReply(log(user(), { type: 'turn.started', turnId: 'turn-0' }, text('Earlier answer.'), { type: 'turn.completed', turnId: 'turn-0', outcome: 'completed', durationMs: 1 }, user('again'), started, call('e1', END))), { landed: true, replied: false });
   assert.deepEqual(turnReply(log(user(), started, text('Working on it.'), user('also do X'), call('e1', END))), { landed: true, replied: false });
@@ -406,7 +432,7 @@ test('one reply: a closing section comes off the reply, bold, # or a bare line',
 // write the card out again, and that looked like not using the card at all.
 test('one reply: a section repeating the card comes off the reply, and one saying more stays', () => {
   const card = { needs: 'you' as const, asks: [{ action: 'Press Bring Them In.' }] };
-  const repeat = 'It is ready.\n\n**What I need from you**\n1. On Tinker Desk, press Bring Them In, then tell me.';
+  const repeat = 'It is ready.\n\n**What I need from you**\n1. On build-box, press Bring Them In, then tell me.';
   assert.equal(replyWithoutRepeat(repeat, card), 'It is ready.');
   // What comes after the list isn't on the card, so it stays.
   assert.equal(replyWithoutRepeat(`${repeat}\n  Say how it went.\n\nOne follow-up: try a clash next.`, card), 'It is ready.\n\nOne follow-up: try a clash next.');
@@ -421,8 +447,8 @@ test('one reply: a section repeating the card comes off the reply, and one sayin
   assert.equal(replyWithoutRepeat(repeat, { needs: 'nothing', next: ['Try it'] }), repeat);
 });
 
-// Mike pressed ? on rows in the agent's shorthand, with no reason given
-// (~/dev/me/misc/end-turn-eval/next-rows). Every form of end_turn has to say
+// Alex pressed ? on rows in the agent's shorthand, with no reason given
+// (~/code/misc/end-turn-eval/next-rows). Every form of end_turn has to say
 // how to write one, as agents are on all of them.
 test('every form of end_turn says how to write a follow-up row', () => {
   for (const provider of ['claude', 'codex'] as const) {
@@ -436,6 +462,27 @@ test('every form of end_turn says how to write a follow-up row', () => {
   }
 });
 
+// Mike couldn't follow cards whose buttons were the agent's own names for
+// the options ("B: thin machine", 8a971407, 17 Nov). A line in the
+// description did nothing in replays; a once-a-turn note did
+// (~/dev/me/misc/end-turn-eval/asks), so it's that, and not the description.
+test('a card with answers to pick from gets the plain-card note, unless it opens a review', () => {
+  assert.ok(wantsPlainCard([{ action: 'Which design?', options: ['B: thin machine', 'C: no machine'] }]));
+  assert.ok(wantsPlainCard([{ action: 'Done?' }, { action: 'Deploy?', options: ['Deploy it', 'Hold off'] }]));
+  assert.ok(!wantsPlainCard([{ action: 'Run claude setup-token on the Hetzner box.' }]), 'a step with no answers');
+  assert.ok(!wantsPlainCard([]));
+  // Lettered mockups in a show_options review are fine as they are.
+  assert.ok(!wantsPlainCard([{ action: 'Which thumbnail?', options: ['A: glitch', 'B: scanner'], links: [{ title: 'Compare them', url: 'review:abc-123' }] }]));
+  assert.ok(wantsPlainCard([{ action: 'Which design?', options: ['B: thin machine'], links: [{ title: 'Read the assessment', url: '/Users/x/assessment.md' }] }]));
+  const note = plainCardNudge();
+  assert.ok(note.startsWith(PLAIN_CARD_NUDGE));
+  assert.match(note, /call end_turn again as it was/);
+  assert.match(note, /once a turn/);
+  for (const provider of ['claude', 'codex'] as const)
+    for (const [bullets, oneReply] of [[true, false], [false, false], [false, true]] as const)
+      assert.doesNotMatch(endTurnDescription(provider, bullets, oneReply), /read this card as the user will/, 'not standing context');
+});
+
 test('every form of end_turn says to try a step first', () => {
   for (const provider of ['claude', 'codex'] as const) {
     for (const [bullets, oneReply] of [[true, false], [false, false], [true, true]]) {
@@ -446,11 +493,79 @@ test('every form of end_turn says to try a step first', () => {
   }
 });
 
+// On 18 Nov the try-first note, on a "Do it for me / I'll do it" card about
+// ~/.aws/config, got an agent to rewrite the file without the user's answer
+// (David Clark's fork, 32cda3c2d). Their credentials are theirs to change.
+test("the try-first wording counts a change to the user's credentials as theirs", () => {
+  for (const text of [TRY_IT_FIRST, tryFirstNudge()]) assert.match(text, /credentials \(~\/\.aws, ~\/\.ssh, Keychain, tokens\)/);
+});
+
 test('offersToTakeItBack knows the answers real cards used, and leaves others alone', () => {
   const offers = (o: string) => offersToTakeItBack([{ action: 'x', options: [o] }]);
   for (const o of ['Can you do it?', 'Can you do it in Chrome?', 'Connected, you do it', 'Do it for me later', 'Can you do the copies?', 'Try it yourself']) assert.ok(offers(o), o);
   for (const o of ['Done', 'Signed in', 'Deploy it', "I can't do it", 'Not yet', 'Hold off']) assert.ok(!offers(o), o);
   assert.ok(!offersToTakeItBack([{ action: 'Can you do it?' }]));
+});
+
+// The cards Mike was handed steps on, 19 Nov 2026 (0b6b183c, 854d950f,
+// 2ee8aeec), and the choices from the same threads that aren't steps.
+test('handsOverAStep knows a step from a choice', () => {
+  const card = (action: string, options?: string[], links?: { title: string; url: string }[]) => handsOverAStep([{ action, options, links }]);
+  for (const [action, options] of [
+    ["In the ADEMark user's System Settings on Tinker Desk, turn on the three things in my reply, then tell me.", ['Done', 'Stuck']],
+    ['On Tinker Desk, allow Desk Runner to use Removable Volumes (System Settings > Privacy & Security > Files & Folders)', ['Done', 'Land without it']],
+    ["Unlock Tinker Desk's screen (Screen Sharing or at the desk) so the Backspace test can click in the app", ['Unlocked', 'Land it anyway']],
+    ["Tinker Desk's screen is on the ademark login (locked). Switch it back to mikeysee, or land the fix without the last test?", ['Switched back', 'Land it anyway']],
+    ['Skip Apple Account sign-in on Tinker Desk, finish the setup screens. Done?', ['Done', 'Stuck']],
+    ['Turn on the setting.', ['Done', 'Can you do it?']],
+    ['Please enable Desk Runner’s Removable Volumes access.', ['I’ve enabled it', 'Stuck']],
+    ['**Turn on** the switch.', undefined],
+    ['Can you enable Desk Runner’s Removable Volumes access?', ['Enabled', 'Stuck']],
+    ['Log into Tinker Desk as ademark.', undefined],
+    ['In [Google Cloud Console](https://console.cloud.google.com/apis/credentials?project=app), copy the Gemini API key.', undefined],
+    ['In [the AI Studio tab](https://aistudio.google.com/apikey), copy the key.', undefined],
+    ['On Tinker Desk, in System Settings, allow Desk Runner on removable volumes.', undefined],
+    ['Allow Desk Runner to use Removable Volumes in order to run the tests.', ['Done', 'Stuck']],
+    ['Drag and drop the cert into Keychain Access.', undefined],
+    ['Click Cancel on the Apple Account prompt on Tinker Desk, then finish setup.', undefined],
+    ['On Tinker Desk, can you allow Desk Runner to use Removable Volumes?', ['Enabled', 'Stuck']],
+    ['Desk Runner needs the external drive.', ['Done — run the test', 'Land without it']],
+    ['Desk Runner needs the external drive.', ["I've turned it on", 'Land without it']],
+    ["Tinker Desk is on the ademark login.", ['Switched back to mikeysee', 'Land it anyway']],
+    ['Allow Desk Runner on Tinker Desk to read its files, so I can run the test?', ["I've allowed it", 'Land without it']],
+    ['Sign in to the store.', ['Signed in', 'Hold off']],
+  ] as const) assert.ok(card(action, options && [...options]), action);
+  for (const [action, options] of [
+    ['What should we do about getting Threadbear onto ADEMark once the GPUI app is out?', ['Private run first', 'Request it now', 'Skip it']],
+    ["Ready to type Tinker Desk's login password into a private card so I can set up the benchmark user myself?", ['Ask me now', "I'll do the steps"]],
+    ["Should I tell you when Tinker Desk's screen is free, so you can switch to the ADEMark user then?", ['Yes, tell me', "I'll just do it"]],
+    ['Can I log your account out of Tinker Desk tonight?', ['Yes, tonight', 'Not yet']],
+    ['Delete the old Linux install on the Dell laptop, now that nothing uses it?', ['Delete it', 'Leave it']],
+    ['Which households should get the portal email?', ['Ever paid + affiliates', 'Paid this or last year']],
+    ['Let me know which name you like', ['Bramble', 'Thicket']],
+    ['Dictate a sentence on your phone and tell me what it typed', undefined],
+    ['Which pricing model should we use?', ['Fixed price', 'Hourly']],
+    ['Which URL should the share link use?', ['Signed URL', 'Public URL']],
+    ['Default for the new switch?', ['Enabled', 'Disabled']],
+    ['Send this email to Emily?', ['Approved', 'Edit first']],
+    ["Let's decide which plan to use.", ['Credits', 'Plan']],
+    ['Delete the old Linux install on the Dell laptop.', ['Delete it', 'Leave it']],
+    ['Buy the weather station kit (about A$246).', ['Order it', 'Wait']],
+    ['In the Google AI Studio tab I brought forward, set up prepay on the Convex billing account and buy US$50 of credit.', ['Done']],
+    ['Delete the old Linux install on the Dell laptop.', ['Done', 'Stuck']],
+    ['Click Delete Account to close it for good.', undefined],
+    ['Complete the payment in Stripe.', ['Done']],
+    ['In [the AI Studio tab](https://aistudio.google.com/billing), set up prepay.', ['Done']],
+    ['**Install the new Tandem now?**', ['Install now', 'Later']],
+    ['Install the new Tandem now? It restarts the app.', ['Install now', 'Later']],
+    ['Open PRs #38 and #41 both touch auth. Which should I merge first?', ['#38', '#41']],
+    ['Which apps should this list show?', ['Installed apps', 'All apps']],
+    ['Keep going with the old plan?', ["I've changed my mind", 'Keep going']],
+  ] as const) assert.ok(!card(action, options && [...options]), action);
+  assert.ok(!card('Turn on one of these', ['Done'], [{ title: 'Review', url: 'review:abc' }]), 'a review is a pick');
+  assert.ok(handsOverAStep([{ action: 'Which design?', options: ['A', 'B'], links: [{ title: 'Review', url: 'review:abc' }] }, { action: 'Allow Desk Runner on removable volumes.', options: ['Done'] }]), "a review doesn't hide the card's other asks");
+  assert.ok(handsOverAStep([{ action: 'Desk Runner needs removable volumes', reply: 'done' }]), "the older form's reply counts");
+  assert.ok(!handsOverAStep([{ action: 'Click Confirm.', why: 'This deletes the account for good.', options: ['Done'] }]), "a why that deletes isn't pressed on");
 });
 
 // Run on the card was taken out (14 Nov 2026): a session that loaded
@@ -508,7 +623,7 @@ test('WakeRead: a notice handed over with "Now write your reply" opens the turn 
 // and what the check must leave alone: over 2,935 done replies it found only
 // those two, once a quoted question stopped counting.
 test("replyAsks: a reply's closing question or go-ahead, and nothing softer", () => {
-  const go = "Yes, I think it's ready to go live:\n- **Approved:** Mike Wheaton approved it.\n- **Cost:** about $9 a day.\n\nSay go and I'll merge main into prod, then check on convex.dev that /examples loads.";
+  const go = "Yes, I think it's ready to go live:\n- **Approved:** Alex Wheaton approved it.\n- **Cost:** about $9 a day.\n\nSay go and I'll merge main into prod, then check on convex.dev that /examples loads.";
   assert.equal(replyAsks(go), "Say go and I'll merge main into prod, then check on convex.dev that /examples loads.");
   assert.equal(replyAsks('Four fork fixes are in. Plan and Ask (#8) overlaps the mode you already have. Which do you want to start with?'), 'Which do you want to start with?');
   // Put to the user mid-paragraph, with a line after it.
@@ -536,5 +651,30 @@ test('replyAsksNudge quotes the sentence, clipped, and says the reply stands', (
   const n = replyAsksNudge('Which do you want to start with?');
   assert.match(n, /^Your reply closes by asking the user something \("Which do you want to start with\?"\)/);
   assert.match(n, /Your message above is the reply: don't write it again/);
+  // It names the field the ask goes in: told "as its ask, with ... options",
+  // a thread sent ask and options as end_turn's own keys (19 Nov).
+  assert.match(n, /asks: \[\{ question, options: \[\{ label \}\] \}\]/);
   assert.ok(replyAsksNudge(`Should I ${'really '.repeat(60)}do it?`).length < 800);
+});
+
+// The Done-in-a-project note's list of earlier items (needs.ts, unansweredItems).
+test('unansweredItems: cards Mike saw, less what he answered by card, words or a review pick; not agents, and not what an edit cut', () => {
+  let seq = 0;
+  const ev = (body: Record<string, unknown>) => ({ seq: ++seq, ts: '', threadId: 't', turnId: 'x', ...body }) as unknown as PersistedEvent;
+  const done = (next: string[]) => ev({ type: 'turn.completed', turnId: 'x', outcome: 'completed', durationMs: 1, needs: 'nothing', next });
+  const asks = (list: { action: string; links?: { title: string; url: string }[] }[]) => ev({ type: 'turn.completed', turnId: 'x', outcome: 'completed', durationMs: 1, needs: 'you', asks: list });
+  const said = (text: string, extra: Record<string, unknown> = {}) => ev({ type: 'user.message', text, images: [], ...extra });
+  const events = [
+    done(['Email Peter the link', 'Load the rest of the photos']),
+    said('Load the rest of the photos'),
+    asks([{ action: 'Pick a look for the site', links: [{ title: 'Compare', url: 'review:abcdef12-3456' }] }, { action: 'Send it to the list now?' }]),
+    said('Review: looks (abcdef12-3456-7890)\n\nPicked A.', { reviewId: 'abcdef12-3456-7890' }),
+    said(`${AGENT_MESSAGE_PREFIX}x] Email Peter the link`),
+    said('Send it to the list now?\nWait', { origin: 'runner' }),
+    done(['Old idea that got cut']),
+  ];
+  events.push(ev({ type: 'thread.rewound', fromSeq: events.at(-1)!.seq, toSeq: events.at(-1)!.seq, files: {} }));
+  assert.deepEqual(unansweredItems(events), ['Email Peter the link', 'Send it to the list now?']);
+  // A card answer names the ask; what the new card already carries isn't listed again.
+  assert.deepEqual(unansweredItems([...events, said('x', { answers: [{ action: 'Send it to the list now?', answer: 'Wait' }] })], ['Email Peter the link']), []);
 });

@@ -12,6 +12,22 @@ function listIn(result: string): string[] {
 // Menu titles can have commas ("Tomorrow, 9 am"), so lists use " | ".
 const wanted = (list: string) => list.split(' | ').map((s) => s.trim());
 
+Then('the Hibernate dialog shows a month calendar and a separate time field', function () {
+  return 'pending';
+});
+
+When('I choose an earlier time today and press Hibernate', function () {
+  return 'pending';
+});
+
+Then('the Hibernate dialog says {string}', function (_words: string) {
+  return 'pending';
+});
+
+Then('its chosen day and time remain available to edit', function () {
+  return 'pending';
+});
+
 Given('the {string} section is unfolded', async function (this: ThreadbearWorld, key: string) {
   await this.app.do({ cmd: 'expand', section: key });
   await this.until(`${key} open`, (d) => d.sidebar.sections.find((s) => s.name.toLowerCase() === key)?.collapsed === false);
@@ -88,9 +104,25 @@ When('a check-in is booked on {string}', async function (this: ThreadbearWorld, 
   await this.app.do({ cmd: 'mock', method: 'checkIn', params: { title } });
 });
 
+// Its agent ended the turn waiting on another thread (end_turn's waitFor),
+// or on the app restarting onto what it landed (the mock's `waitOn`).
+When('{string} waits on {string}', async function (this: ThreadbearWorld, title: string, on: string) {
+  await this.app.do({ cmd: 'mock', method: 'waitOn', params: { title, on } });
+});
+
+When('{string} waits for the app update', async function (this: ThreadbearWorld, title: string) {
+  await this.app.do({ cmd: 'mock', method: 'waitOn', params: { title, app: true } });
+});
+
 // Under Hibernating for its schedule: when that runs, in the time's place
 // ("3:05 pm" today, "Mon 9:00 am" otherwise; the clock's own style).
 Then('the row {string} says when its schedule messages it', async function (this: ThreadbearWorld, title: string) {
   const pattern = /^([A-Z][a-z]{2} )?\d{1,2}[:.]\d{2}(\s?[ap]\.?m\.?)?$/i;
   await this.until(`"${title}" saying when its schedule runs`, (d) => pattern.test(this.thread(d, title)?.trailing ?? ''));
+});
+
+// The real right click, with the menu left up (`keep`) for what comes next.
+When('I right-click the row {string} and leave its menu open', async function (this: ThreadbearWorld, title: string) {
+  await this.until(`a thread called "${title}"`, (d) => this.thread(d, title));
+  await this.app.do({ cmd: 'realMenu', tipPrefix: `${title}\n`, right: true, keep: true });
 });

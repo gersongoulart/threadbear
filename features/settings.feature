@@ -49,3 +49,21 @@ Feature: Settings
     Then Settings lists the private folder "~/dev/clients/acme"
     When I press "Stop keeping this folder private" in Settings
     Then Settings lists no private folders
+
+  @settings.general @swift-pending
+  Scenario: A reviewer can be taken off the list of who reviews code
+    When I open Settings
+    Then Settings lists the reviewers "codex, claude"
+    When I press "Take Codex off the list" in Settings
+    Then Settings lists the reviewers "claude"
+
+  # Appearance's accent and spacing (Mike picked them, 17 Nov). The Swift app
+  # is frozen, so it never gets them (AGENTS.md).
+  @settings.general @swift-pending
+  Scenario: Picking an accent and Compact spacing changes how Threadbear looks
+    When I open Settings
+    Then Settings says the accent is "system"
+    When I press "Use Plum as the accent" in Settings
+    Then Settings says the accent is "plum"
+    When I press "Rows and turns closer together" in Settings
+    Then Settings says the spacing is compact

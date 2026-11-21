@@ -3,7 +3,7 @@
 // with gpt-6-luna at low effort, tiny prompts and temp working folders.
 // Run with `./check.sh --e2e` (TB_E2E_SKIP_CODEX=1 skips it).
 //
-// It uses Mike's real ~/.codex, since the login lives there, so codexArgs
+// It uses Alex's real ~/.codex, since the login lives there, so codexArgs
 // switch off everything that writes to that home or starts work by itself
 // (memories, chronicle, goals and his six MCP servers). Every Codex thread
 // it makes is deleted afterwards with thread/delete, with its
@@ -16,6 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { RunnerClient } from '../../src/client.ts';
+import { testLogin } from '../../src/test-login.ts';
 import { AppServerProcess, fallbackCodexPath } from '../../src/adapters/codex/appserver.ts';
 import { ProcessRegistry } from '../../src/proc.ts';
 import { nullLogger } from '../../src/log.ts';
@@ -29,7 +30,7 @@ const IMAGEGEN = process.env.TB_E2E_CODEX_IMAGEGEN === '1';
 const IDLE_MS = 8000;
 const RUNNER_DIR = path.join(import.meta.dirname, '..', '..');
 const CODEX_HOME = path.join(os.homedir(), '.codex');
-// Mike's MCP servers, by their config.toml table keys.
+// Alex's MCP servers, by their config.toml table keys.
 const MCP_SERVERS = ['openaiDeveloperDocs', 'node_repl', 'computer-use', 'paper', 'agent-archive', 'connectors'];
 const CODEX_ARGS = [
   '--disable', 'memories',
@@ -453,7 +454,7 @@ describe('Codex threads end to end (real codex app-server)', { concurrency: fals
     await waitFor('the sleep starts', () => turnEvents(t.id, t.turnId).find((e) => e.type === 'tool.call' && /sleep 25/.test(e.title)));
     const codexId = summaries.get(t.id)?.nativeSessionId;
     if (codexId) codexIdsMovedAway.push(codexId);
-    await client.call('threads.update', { threadId: t.id, accountId: process.env.TB_E2E_ACCOUNT ?? 'claude-main', model: 'claude-haiku-5-5' });
+    await client.call('threads.update', { threadId: t.id, accountId: testLogin(), model: 'claude-haiku-5-5' });
     await waitFor('the switch note', () => turnEvents(t.id, t.turnId).find((e) => e.type === 'system.note' && /takes over from your next message/.test(e.text)), 10_000);
     const next = await send(t.id, 'Which shell command were you running just now? Reply with only the command.');
     assert.notEqual(next, t.turnId, 'not steered into the Codex turn');

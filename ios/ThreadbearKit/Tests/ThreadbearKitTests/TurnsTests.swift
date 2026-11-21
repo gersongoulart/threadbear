@@ -162,6 +162,29 @@ import Testing
         #expect(AskAnswer.followUpMessage(["Check the nightly", "Refresh the cache"], extra: " quick \n") == "- Check the nightly\n- Refresh the cache\n\nquick")
     }
 
+    /// A message that answered asks is drawn as the Mac draws it (Mike, 18
+    /// Nov): the answers it starts with, then what he wrote; text that
+    /// doesn't start with them shows as it is.
+    @Test func answeredMessagesSplitIntoAnswersAndHisWords() throws {
+        let asks = [
+            PhoneAsk(action: "Merge it?", why: "Tests pass.", options: ["Merge", "Not yet"]),
+            PhoneAsk(action: "Add the key", why: "In Settings.", reply: "done"),
+        ]
+        let one = [AskAnswer(action: "Merge it?", answer: "Not yet")]
+        #expect(AskAnswer.extra(text: AskAnswer.message(asks: [asks[0]], picks: [0: 1]), answers: one) == "")
+        #expect(AskAnswer.extra(text: AskAnswer.message(asks: [asks[0]], picks: [0: 1], extra: "after lunch"), answers: one) == "after lunch")
+        let both = AskAnswer.answers(asks: asks, picks: [0: 0, 1: 0]).map(\.answer)
+        #expect(AskAnswer.extra(text: AskAnswer.message(asks: asks, picks: [0: 0, 1: 0], extra: "ta"), answers: both) == "ta")
+        #expect(AskAnswer.extra(text: "Merge it? Not yet", answers: one) == nil)
+        #expect(AskAnswer.extra(text: "Merge it?\nNot yet please", answers: one) == nil)
+        #expect(AskAnswer.extra(text: "anything", answers: []) == nil)
+        let row = #"{"seq":4.0,"role":"user","text":"Merge it?\nNot yet","answers":[{"action":"Merge it?","answer":"Not yet"}],"at":"2026-10-30T00:00:00.000Z"}"#
+        let message = try JSONDecoder().decode(PhoneMessage.self, from: Data(row.utf8))
+        #expect(message.answers == one)
+        let again = try JSONDecoder().decode(PhoneMessage.self, from: JSONEncoder().encode(message))
+        #expect(again.answers == one)
+    }
+
     @Test func threadRowsAndMessagesDecodeTheCard() throws {
         let row = #"""
         {"threadId":"t","runnerId":"r","title":"T","cwd":"/w","accountId":"a","provider":"claude","status":"idle","needsYou":true,"unread":true,"preview":"p","lastActivityAt":"2026-10-30T00:00:00.000Z","view":"inbox",
@@ -182,7 +205,7 @@ import Testing
 /// web/src/turns.test.ts.
 @Suite struct LoginNoteTests {
     let t0 = Date(timeIntervalSince1970: 1_800_000_000)
-    let moved = "Moved to mike@example.org: mike@example.net hit its 5-hour limit, back at 11:30 am."
+    let moved = "Moved to alex@example.org: alex@example.net hit its 5-hour limit, back at 11:30 am."
     func m(_ seq: Int, _ role: PhoneMessage.Role, _ text: String, at: Double, origin: String? = nil, turn: String? = nil) -> PhoneMessage {
         PhoneMessage(seq: seq, role: role, text: text, origin: origin, toolKind: role == .tool ? "command" : nil, turn: turn, at: t0.addingTimeInterval(at))
     }

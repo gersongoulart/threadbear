@@ -144,6 +144,9 @@ pub struct UserMessage {
     /// "runner" when the runner sent it by itself, "schedule" when a
     /// schedule did, None when a person or a client did.
     pub origin: Option<String>,
+    /// For the runner's own message, what happened in a few words
+    /// (`wakeReason`, "Moved to another login").
+    pub wake_reason: Option<String>,
     /// The asks it answered from the card.
     pub answers: Vec<AskAnswer>,
     /// His answer to a review.
@@ -175,6 +178,22 @@ impl UserMessage {
     /// Sent by a schedule: also a note.
     pub fn is_from_schedule(&self) -> bool {
         self.origin.as_deref() == Some("schedule")
+    }
+
+    /// The runner's note's first line: what made it send the message, from
+    /// its wake reason, or that it restarted when that's the reason or
+    /// none came with it (older runners).
+    pub fn runner_header(&self) -> String {
+        const RESTARTED: &str = "Sent by the runner after it restarted";
+        let Some(reason) = self.wake_reason.as_deref().map(str::trim).filter(|r| !r.is_empty()) else {
+            return RESTARTED.to_owned();
+        };
+        if matches!(reason, "The runner restarted" | "The runner came back") {
+            return RESTARTED.to_owned();
+        }
+        let mut chars = reason.chars();
+        let first = chars.next().map(|c| c.to_lowercase().collect::<String>()).unwrap_or_default();
+        format!("Sent by the runner: {first}{}", chars.as_str())
     }
 
     /// Drawn as a centred note rather than Mike's bubble.
@@ -556,6 +575,16 @@ impl RowContent {
         let RowContent::Note(text) = self else { return false };
         let moved = text.starts_with("Moved to ") && text.contains(": ") && !text.contains("The session carries on there");
         moved || text.contains(" Carrying on at ") || text.starts_with("Won't carry on by itself")
+    }
+
+    /// The note an early Stop leaves when it keeps Mike's message (and its
+    /// pictures) for his next send (`savedMessage`, runner.ts). It's how he
+    /// knows his words weren't lost, so like a login note it never folds
+    /// into the work: folded, its turn showed nothing at all (the nightly
+    /// parity run, 14 Nov 2026). Another Mac gets it marked `login` and
+    /// this one `savedMessage`, so the runner's words are what's read.
+    pub fn is_saved_message_note(&self) -> bool {
+        matches!(self, RowContent::Note(text) if text.starts_with("Your stopped message"))
     }
 }
 

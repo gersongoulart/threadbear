@@ -36,7 +36,8 @@ function fakeIo(runs: Run[]) {
   return { io, said, calls };
 }
 
-const c = { npm: '/opt/node/bin/npm', node: '/opt/node/bin/node' };
+// A Mac's: on Windows unitTests runs test-windows.mjs instead (below).
+const c = { npm: '/opt/node/bin/npm', node: '/opt/node/bin/node', platform: 'darwin' as const };
 
 test('step: a process that never started says why, in the error and its log', () => {
   const { io } = fakeIo([{ status: null, error: Object.assign(new Error('spawn /opt/node/bin/npm EAGAIN'), { code: 'EAGAIN' }) }]);
@@ -72,6 +73,18 @@ test('unitTests: a break that fails both whole runs still stops the build', () =
   const { io, calls } = fakeIo([{ status: 1, output: 'Error: Cannot find module\n' }, { status: 1, output: 'Error: Cannot find module\n' }]);
   assert.throws(() => steps.unitTests(c, {}, io), /Unit tests, again failed \(npm exited with 1\)/);
   assert.equal(calls.length, 2);
+});
+
+test("unitTests on Windows: test-windows.mjs's update gate, the files that cover what only Windows runs", () => {
+  const { io, calls } = fakeIo([{ status: 0 }]);
+  steps.unitTests({ ...c, platform: 'win32' }, {}, io);
+  assert.deepEqual(calls.map((x) => [x.cmd, ...x.args]), [[c.node, 'scripts/test-windows.mjs', '--gate']]);
+});
+
+test('step: a script (npm-cli.js on Windows) runs on this Node', () => {
+  const { io, calls } = fakeIo([{ status: 0 }]);
+  steps.step('npm', 'C:\\node\\node_modules\\npm\\bin\\npm-cli.js', ['ci'], {}, io);
+  assert.deepEqual([calls[0].cmd, ...calls[0].args], [process.execPath, 'C:\\node\\node_modules\\npm\\bin\\npm-cli.js', 'ci']);
 });
 
 test('unitTests: failed files are rerun alone, not the whole suite', () => {
@@ -163,8 +176,8 @@ test("a step that failed with no sleep, or where the sleep count can't be read, 
 });
 
 test('checkHostsFrom reads runner.json the way check.sh does', () => {
-  assert.deepEqual(steps.checkHostsFrom({ checkHost: 'tinker-desk' }), ['tinker-desk']);
-  assert.deepEqual(steps.checkHostsFrom({ checkHost: 'tinker-desk', checkHosts: ['tinker-desk', 'cloud'] }), ['tinker-desk', 'cloud']);
+  assert.deepEqual(steps.checkHostsFrom({ checkHost: 'build-box' }), ['build-box']);
+  assert.deepEqual(steps.checkHostsFrom({ checkHost: 'build-box', checkHosts: ['build-box', 'cloud'] }), ['build-box', 'cloud']);
   // Not a plain host name (an option, a shell word): dropped, as check.sh does.
   assert.deepEqual(steps.checkHostsFrom({ checkHosts: ['-oProxyCommand=x', 'a b', 'cloud', 7] }), ['cloud']);
   assert.deepEqual(steps.checkHostsFrom({}), []);
@@ -192,28 +205,28 @@ test('remoteChecks hands the runner checks to check.sh --runner with the hosts a
       return spawn(cmd, args, opts);
     },
   };
-  assert.equal(steps.remoteChecks(['tinker-desk', 'cloud'], root, { cwd: '/elsewhere', env: { PATH: '/bin' } }, io2), true);
+  assert.equal(steps.remoteChecks(['build-box', 'cloud'], root, { cwd: '/elsewhere', env: { PATH: '/bin' } }, io2), true);
   assert.deepEqual(calls, [{ cmd: path.join(root, 'check.sh'), args: ['--runner'] }]);
-  assert.equal(env?.THREADBEAR_CHECK_HOST, 'tinker-desk,cloud');
+  assert.equal(env?.THREADBEAR_CHECK_HOST, 'build-box,cloud');
   assert.equal(env?.THREADBEAR_NODE, '/opt/node/bin/node');
   assert.equal(env?.PATH, '/bin');
 });
 
 test('remoteChecks runs a failed check once more, and a second failure fails the update', () => {
-  const fail = { status: 1, output: 'Checking on tinker-desk\nFAIL  runner unit tests   80s  /tmp/x.log\n' };
+  const fail = { status: 1, output: 'Checking on build-box\nFAIL  runner unit tests   80s  /tmp/x.log\n' };
   const flaky = fakeIo([fail, { status: 0 }]);
-  assert.equal(steps.remoteChecks(['tinker-desk'], withCheckSh(), { env: {} }, flaky.io), true);
+  assert.equal(steps.remoteChecks(['build-box'], withCheckSh(), { env: {} }, flaky.io), true);
   assert.equal(flaky.calls.length, 2);
   const broken = fakeIo([fail, fail]);
-  assert.throws(() => steps.remoteChecks(['tinker-desk'], withCheckSh(), { env: {} }, broken.io), (e: unknown) => e instanceof steps.StepFailed && !(e instanceof steps.ChecksUnavailable));
+  assert.throws(() => steps.remoteChecks(['build-box'], withCheckSh(), { env: {} }, broken.io), (e: unknown) => e instanceof steps.StepFailed && !(e instanceof steps.ChecksUnavailable));
   // A check that failed before any step said FAIL (check.sh itself broken) is still a failure.
   const early = fakeIo([{ status: 2, output: 'check.sh: syntax error' }, { status: 2 }]);
-  assert.throws(() => steps.remoteChecks(['tinker-desk'], withCheckSh(), { env: {} }, early.io), (e: unknown) => e instanceof steps.StepFailed && !(e instanceof steps.ChecksUnavailable));
+  assert.throws(() => steps.remoteChecks(['build-box'], withCheckSh(), { env: {} }, early.io), (e: unknown) => e instanceof steps.StepFailed && !(e instanceof steps.ChecksUnavailable));
 });
 
 test('remoteChecks does not rerun a failure that ran on this Mac', () => {
-  const { io, calls } = fakeIo([{ status: 1, output: 'None of tinker-desk can run this check now.\nSo the checks run on this Mac instead, at low priority.\nFAIL  runner unit tests\n' }]);
-  assert.throws(() => steps.remoteChecks(['tinker-desk'], withCheckSh(), { env: {} }, io), steps.StepFailed);
+  const { io, calls } = fakeIo([{ status: 1, output: 'None of build-box can run this check now.\nSo the checks run on this Mac instead, at low priority.\nFAIL  runner unit tests\n' }]);
+  assert.throws(() => steps.remoteChecks(['build-box'], withCheckSh(), { env: {} }, io), steps.StepFailed);
   assert.equal(calls.length, 1);
 });
 
@@ -222,18 +235,18 @@ test('remoteChecks takes the check hosts\' busy exit as their trouble, on either
   const first = fakeIo([{ status: steps.UNAVAILABLE_EXIT, output: 'No check host has room for this check\n' }]);
   const spawn = first.io.spawn;
   const io = { ...first.io, spawn: (cmd: string, args: string[], opts: any) => ((env = opts.env), spawn(cmd, args, opts)) };
-  assert.throws(() => steps.remoteChecks(['tinker-desk'], withCheckSh(), { env: {} }, io), steps.ChecksUnavailable);
+  assert.throws(() => steps.remoteChecks(['build-box'], withCheckSh(), { env: {} }, io), steps.ChecksUnavailable);
   assert.equal(first.calls.length, 1);
   assert.equal(env?.THREADBEAR_CHECK_BUSY_EXIT, String(steps.UNAVAILABLE_EXIT));
   const second = fakeIo([{ status: 1, output: 'FAIL  runner unit tests\n' }, { status: steps.UNAVAILABLE_EXIT }]);
-  assert.throws(() => steps.remoteChecks(['tinker-desk'], withCheckSh(), { env: {} }, second.io), steps.ChecksUnavailable);
+  assert.throws(() => steps.remoteChecks(['build-box'], withCheckSh(), { env: {} }, second.io), steps.ChecksUnavailable);
   assert.equal(second.calls.length, 2);
 });
 
 test('remoteChecks leaves the checks here with no host, or no check.sh', () => {
   const { io, calls } = fakeIo([]);
   assert.equal(steps.remoteChecks([], tmpDir(), { env: {} }, io), false);
-  assert.equal(steps.remoteChecks(['tinker-desk'], tmpDir(), { env: {} }, io), false);
+  assert.equal(steps.remoteChecks(['build-box'], tmpDir(), { env: {} }, io), false);
   assert.deepEqual(calls, []);
 });
 
@@ -290,4 +303,16 @@ test('stepRetryingNetwork: any other failure fails at once, with no wait', () =>
 test('networkDropped: connection drops and DNS misses, not a failing step', () => {
   for (const s of ['fetch failed', 'Error: connect ECONNREFUSED 127.0.0.1:3210', 'read ECONNRESET', 'getaddrinfo ENOTFOUND api.convex.dev', 'getaddrinfo EAI_AGAIN x', 'connect ETIMEDOUT 1.2.3.4:443', 'socket hang up', "code: 'UND_ERR_SOCKET'"]) assert.ok(steps.networkDropped(s), s);
   for (const s of ['Type error: x is not assignable', 'npm ERR! code E404', '']) assert.ok(!steps.networkDropped(s), s);
+});
+
+// npm ci cut off partway (the runner restarting under it) leaves
+// node_modules with packages but not finished: no .bin, so the typecheck
+// failed with "tsc: command not found" on every deploy after (a fork, 11 Nov).
+test('packagesInstalled: only a finished npm install counts', () => {
+  const dir = tmpDir('tb-deploy-pkgs-');
+  assert.equal(steps.packagesInstalled(dir), false, 'no node_modules');
+  fs.mkdirSync(path.join(dir, 'node_modules', 'typescript'), { recursive: true });
+  assert.equal(steps.packagesInstalled(dir), false, 'packages but npm never finished');
+  fs.writeFileSync(path.join(dir, 'node_modules', '.package-lock.json'), '{}\n');
+  assert.equal(steps.packagesInstalled(dir), true);
 });

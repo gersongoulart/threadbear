@@ -1,5 +1,6 @@
 // settings.get and settings.update (docs/protocol.md): the runner's side
 // of the Settings window. Everything lives in runner.json.
+import { DEFAULT_LAB_REVIEWERS, labReviewerProblem, parseLabReviewers, ticked, type LabReviewer } from './lab-reviewers.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Config } from './config.ts';
@@ -30,12 +31,22 @@ export type Settings = {
   oneReply: boolean;
   // Review by another lab (runner/lab-review.ts).
   labReview: boolean;
+  // Who reviews, in order (lab-reviewers.ts): runner.json's list, or the
+  // default when it has none.
+  labReviewers: LabReviewer[];
+  // Who reviews a big or risky change, all at once, and how many lines make
+  // a change big (lab-review.ts, panelChange).
+  labPanel: LabReviewer[];
+  labPanelLines: number;
   // Keep the Mac awake while threads work (keep-awake.ts). Only on a Mac:
   // left out elsewhere, so Settings shows no switch for it.
   keepAwake?: boolean;
   // How often a fork's runner starts a thread to bring in Mike's releases
   // (bring-in.ts): every so many days, 'important' or 'off'.
   bringIn: BringInSetting;
+  // A thread suggesting work when a login's week is about to go unused
+  // (spare-week.ts). runner.json `spareWeek`, on unless it's false.
+  spareWeek: boolean;
   // Full sync (docs/full-convex.md): tool output goes to Convex too. What
   // runner.json says, which takes effect when the runner next starts.
   fullSync: boolean;
@@ -55,8 +66,11 @@ export type SettingsUpdate = {
   bulletReplies?: boolean;
   oneReply?: boolean;
   labReview?: boolean;
+  labReviewers?: LabReviewer[];
+  labPanel?: LabReviewer[];
   keepAwake?: boolean;
   bringIn?: BringInSetting;
+  spareWeek?: boolean;
   fullSync?: boolean;
   models?: { pool?: string | null; privateFolders?: string[] };
   // Experiment id to on or off, saved under runner.json `experiments`.
@@ -87,8 +101,12 @@ export class SettingsService {
       bulletReplies: this.cfg.bulletReplies,
       oneReply: this.cfg.oneReply,
       labReview: this.cfg.labReview,
+      labReviewers: (this.cfg.labReviewers ?? DEFAULT_LAB_REVIEWERS).map((r) => ({ ...r })),
+      labPanel: (this.cfg.labPanel ?? []).map((r) => ({ ...r })),
+      labPanelLines: this.cfg.labPanelLines,
       ...(process.platform === 'darwin' ? { keepAwake: this.cfg.keepAwake } : {}),
       bringIn: bringInSetting(this.cfg.home),
+      spareWeek: spareWeekOn(this.cfg.home),
       fullSync: peekRunnerJson(this.cfg.home).sync?.full === true,
       models: {
         pool: this.cfg.models.pool,
@@ -138,14 +156,23 @@ export class SettingsService {
     if (u.bulletReplies !== undefined) json.bulletReplies = this.cfg.bulletReplies = u.bulletReplies;
     if (u.oneReply !== undefined) json.oneReply = this.cfg.oneReply = u.oneReply;
     if (u.labReview !== undefined) json.labReview = this.cfg.labReview = u.labReview;
+    if (u.labReviewers !== undefined) {
+      this.cfg.labReviewers = u.labReviewers.map((r) => ({ ...r }));
+      json.labReviewers = u.labReviewers;
+    }
+    if (u.labPanel !== undefined) this.cfg.labPanel = u.labPanel.map((r) => ({ ...r }));
+    // Saved with the list too, so a runner.json still in the old form (the
+    // panel ticked in labReviewers) keeps its panel as the ticks go.
+    if (u.labPanel !== undefined || u.labReviewers !== undefined) json.labPanel = this.cfg.labPanel ?? [];
     if (u.keepAwake !== undefined) json.keepAwake = this.cfg.keepAwake = u.keepAwake;
     // Read each time it's needed (bring-in.ts), so this takes effect at once.
     if (u.bringIn !== undefined) json.releases = { ...json.releases, bringIn: u.bringIn };
-    // Saved only: the mirror reads it when the runner starts. Either answer is
-    // an answer, so the runner never asks about it again (convex-use.ts).
-    // And the question's thread can't answer it again (Daybreak 121).
+    // Read at each check (spare-week.ts), so this takes effect at once.
+    if (u.spareWeek !== undefined) json.spareWeek = u.spareWeek;
+    // Saved only: the mirror reads it when the runner starts. The once-only
+    // offer's notes (taken out 16 Nov 2026) go with any answer.
     if (u.fullSync !== undefined) {
-      const { fullAskedThread: _t, fullAskedQuestion: _q, ...sync } = json.sync ?? {};
+      const { fullAsked: _a, fullAskedThread: _t, fullAskedQuestion: _q, ...sync } = json.sync ?? {};
       json.sync = { ...sync, full: u.fullSync };
     }
     if (folders !== undefined || pool !== undefined) {
@@ -190,9 +217,30 @@ export function settingsMethods(s: SettingsService): Record<string, (p: Record<s
         if (typeof p.labReview !== 'boolean') throw bad('labReview must be a boolean');
         u.labReview = p.labReview;
       }
+      if (p.labReviewers !== undefined) {
+        if (!Array.isArray(p.labReviewers)) throw bad('labReviewers must be a list');
+        const problem = p.labReviewers.map(labReviewerProblem).find(Boolean);
+        if (problem) throw bad(problem);
+        u.labReviewers = parseLabReviewers(p.labReviewers);
+        // An app from before the two lists ticks the panel in this one.
+        if (p.labPanel === undefined) {
+          const board = ticked(p.labReviewers);
+          if (board) u.labPanel = board;
+        }
+      }
+      if (p.labPanel !== undefined) {
+        if (!Array.isArray(p.labPanel)) throw bad('labPanel must be a list');
+        const problem = p.labPanel.map(labReviewerProblem).find(Boolean);
+        if (problem) throw bad(problem.replace('labReviewers', 'labPanel'));
+        u.labPanel = parseLabReviewers(p.labPanel);
+      }
       if (p.keepAwake !== undefined) {
         if (typeof p.keepAwake !== 'boolean') throw bad('keepAwake must be a boolean');
         u.keepAwake = p.keepAwake;
+      }
+      if (p.spareWeek !== undefined) {
+        if (typeof p.spareWeek !== 'boolean') throw bad('spareWeek must be a boolean');
+        u.spareWeek = p.spareWeek;
       }
       if (p.fullSync !== undefined) {
         if (typeof p.fullSync !== 'boolean') throw bad('fullSync must be a boolean');
@@ -294,4 +342,8 @@ function maxTokens(p: Record<string, unknown>): { maxTokens?: number } {
 // runner.json `releases.bringIn`, or every 5 days.
 export function bringInSetting(home: string): BringInSetting {
   return parseBringIn(peekRunnerJson(home).releases?.bringIn) ?? DEFAULT_BRING_IN_DAYS;
+}
+
+export function spareWeekOn(home: string): boolean {
+  return peekRunnerJson(home).spareWeek !== false;
 }

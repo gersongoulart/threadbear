@@ -127,7 +127,8 @@ pub(crate) fn row_menu(row: &Row, open: bool) -> Vec<(&'static str, RowMenuActio
     let mut items = vec![];
     if message_text(row).is_some() {
         items.push(("Copy message", RowMenuAction::CopyMessage));
-        if matches!(row.kind(), RowKind::Tool | RowKind::Reasoning | RowKind::Diff | RowKind::Group) {
+        let folding_review = matches!(&row.content, RowContent::LabReview(review) if review.folds());
+        if folding_review || matches!(row.kind(), RowKind::Tool | RowKind::Reasoning | RowKind::Diff | RowKind::Group) {
             items.push((if open { "Collapse" } else { "Expand" }, RowMenuAction::Toggle));
         }
     }
@@ -194,12 +195,12 @@ fn transcript_text(title: &str, rows: &[Row]) -> String {
 impl ThreadPane {
     /// `menu(forRow:)`: Copy message, Expand or Collapse, Copy transcript as
     /// Markdown, and what an agent needs to find this row again.
-    pub(crate) fn row_context_menu(row: Row, menu: PopupMenu, pane: WeakEntity<ThreadPane>, open: bool, cx: &App) -> PopupMenu {
+    pub(crate) fn row_context_menu(row: Row, menu: PopupMenu, pane: WeakEntity<ThreadPane>, open: bool, window: &mut Window, cx: &mut App) -> PopupMenu {
         let copying = pane.upgrade().is_some_and(|p| {
             let p = p.read(cx);
             p.app.upgrade().is_some_and(|app| app.read(cx).busy_notes.iter().any(|(key, _)| key == &format!("copying/{}", p.summary.id)))
         });
-        let mut menu = menu.min_w(px(CARD_PAD * 16.));
+        let mut menu = crate::native_text::context_items(menu, pane.clone(), window, cx).min_w(px(CARD_PAD * 16.));
         for (title, action) in row_menu(&row, open) {
             if action == RowMenuAction::CopyDebugInfo {
                 menu = menu.separator();

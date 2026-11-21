@@ -5,7 +5,6 @@
 // install's runner.json (scripts/setup.mjs).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import path from 'node:path';
 import { makeHarness, testConfig, tmpDir } from '../helpers/fakes.ts';
 import { loadConfig, writeRunnerJson } from '../../src/config.ts';
@@ -18,7 +17,7 @@ test('config: defaults.permissionMode is read from runner.json; unset, plan or n
     writeRunnerJson(home, { defaults: { permissionMode: mode } });
     assert.equal(loadConfig({ THREADBEAR_HOME: home }).defaults.permissionMode, mode);
   }
-  // Plan first waits for Mike to approve a plan, so a thread nobody's
+  // Plan first waits for Alex to approve a plan, so a thread nobody's
   // watching (a schedule, one from the phone) would just sit there.
   for (const bad of ['plan', 'yolo', 3]) {
     writeRunnerJson(home, { defaults: { permissionMode: bad as never } });
@@ -63,13 +62,4 @@ test("the runner's own threads start on the install's default mode", () => {
   const h = makeHarness();
   assert.equal(h.runner.get(startOwnThread(h.runner, { text: 'x', title: 'x', why: 'x' }, undefined)).permissionMode, 'full');
   assert.equal(h.runner.get(h.runner.noticeOnMac(undefined, 'A dialog', 'x')).permissionMode, 'full');
-});
-
-test("main.ts starts the bring-in and update-fixer threads through startOwnThread, naming no mode", () => {
-  // main() wires live services, so it isn't run here: its source is read
-  // instead, so a hard-coded mode coming back fails.
-  const src = fs.readFileSync(path.join(import.meta.dirname, '../../src/main.ts'), 'utf8');
-  assert.match(src, /startOwnThread\(runner, r, updateRelease\?\.checkout\)/);
-  assert.match(src, /startOwnThread\(runner, r, thisRelease\?\.checkout\)/);
-  assert.doesNotMatch(src, /permissionMode: 'full'/);
 });

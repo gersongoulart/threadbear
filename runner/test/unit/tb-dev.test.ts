@@ -14,6 +14,8 @@ import { nullLogger } from '../../src/log.ts';
 import type { PersistedEvent, ThreadSummary } from '../../src/protocol.ts';
 import type { RunnerStatus } from '../../src/restart.ts';
 import { patiently } from '../helpers/patience.ts';
+import { IS_WINDOWS, escapeRegExp, skipOnWindows } from '../helpers/platform.ts';
+import { dataDirFor } from '../../src/platform.ts';
 
 const TB = path.resolve(import.meta.dirname, '..', '..', 'bin', 'tb');
 // How tb prints itself: quoted when the checkout path has a space (the
@@ -246,6 +248,18 @@ test('tb export writes the mock runner fixture format, with images copied next t
   assert.equal(back[15].origin, 'runner');
 });
 
+test('a thread exports again over its read-only pictures', { skip: IS_WINDOWS && 'read-only files differ on Windows' }, () => {
+  const src = tmpDir();
+  const shot = path.join(src, 'shot.png');
+  fs.writeFileSync(shot, makePng(4, 3));
+  // The runner's media is read-only (0400), and a copy keeps that.
+  fs.chmodSync(shot, 0o400);
+  const out = path.join(tmpDir(), T.id);
+  exportThread(T, events(shot), out);
+  assert.doesNotThrow(() => exportThread(T, events(shot), out));
+  assert.deepEqual(fs.readdirSync(path.join(out, 'media')), ['shot.png']);
+});
+
 test('the mock runner loads an export', { skip: !fs.existsSync(path.join(MOCK, 'node_modules', 'ws')) && 'mock runner has no node_modules' }, async () => {
   const src = tmpDir();
   fs.writeFileSync(path.join(src, 'shot.png'), makePng(4, 3));
@@ -375,11 +389,11 @@ test('tb status, self, show, export and rpc against a runner', async () => {
     r = await run(h.home, url, ['export', thread.id, '--out', out]);
     assert.equal(r.code, 0, r.out);
     assert.match(r.out, /Exported 4 events and 0 images to /);
-    assert.match(r.out, new RegExp(`--fixtures ${out.replaceAll('.', '\\.')}\n`), 'loads the export alone');
+    assert.match(r.out, new RegExp(`--fixtures ${escapeRegExp(process.platform === 'win32' ? `'${out}'` : out)}\n`), 'loads the export alone');
     // The debug app comes first, and there's no bare mock runner line to
     // run in the foreground by mistake.
     // The path is quoted when the checkout sits under a dir with a space.
-    assert.match(r.out, /\n  ('[^']*|\S*)app\/Tools\/dev-app\.sh'? start --mock --fixtures /);
+    assert.match(r.out, new RegExp(`\\n  ('[^']*|\\S*)${escapeRegExp(`app${path.sep}Tools${path.sep}dev-app.sh`)}'? start --mock --fixtures `));
     assert.doesNotMatch(r.out, /server\.mjs/);
     assert.match(r.out, new RegExp(`tb'? events ${thread.id.slice(0, 8)} --from N --to M\n`));
     assert.equal(fs.readFileSync(path.join(out, 'events.ndjson'), 'utf8').trim().split('\n').length, 4);
@@ -530,7 +544,9 @@ test('tb logs prints the tail, filters by thread, and follows', async () => {
   } finally {
     f.kill();
   }
-  assert.equal(await f.exited, 0, 'SIGTERM ends a follow cleanly');
+  // Windows ends a process outright instead of delivering SIGTERM, so there is no clean exit to see.
+  const followed = await f.exited;
+  if (!IS_WINDOWS) assert.equal(followed, 0, 'SIGTERM ends a follow cleanly');
 });
 
 test('tb restart leaves the live runner alone: refused from its own threads, and from anywhere when it runs from a checkout', () => {
@@ -554,12 +570,13 @@ test('tb restart leaves the live runner alone: refused from its own threads, and
 });
 
 test('tb restart and tb rpc against the live runner from one of its threads', async () => {
-  // tb takes the real data dir from HOME, so a temp HOME makes this
-  // runner look like the live one without going near it.
+  // tb takes the real data dir from HOME (APPDATA on Windows), so a temp
+  // home makes this runner look like the live one without going near it.
   const fakeHome = tmpDir();
-  const real = path.join(fakeHome, 'Library', 'Application Support', 'Threadbear');
+  const appData = path.join(fakeHome, 'AppData', 'Roaming');
+  const real = dataDirFor({ home: fakeHome, env: { APPDATA: appData } });
   fs.mkdirSync(real, { recursive: true });
-  const env = { HOME: fakeHome };
+  const env = { HOME: fakeHome, USERPROFILE: fakeHome, APPDATA: appData };
   {
     // (This test process is the runner's stand-in and tb's parent, so tb
     // sees itself as running under it.)
@@ -630,7 +647,7 @@ test("tb restart --now won't cut other threads short, and names the caller's own
   }
 });
 
-test('tb restart --cancel prints what happened to the release, tb self names the runner it is on, and bad flags get a message', async () => {
+test('tb restart --cancel prints what happened to the release, tb self names the runner it is on, and bad flags get a message', skipOnWindows("the current release link is a symlink renamed over the old one, which isn't ported to Windows yet"), async () => {
   const { h, r: restarter, server, url } = await serve({ release: 'A', version: '0.1.0+A' });
   try {
     const dir = path.join(h.home, 'runner');
@@ -769,13 +786,13 @@ test('formatStatus: the line for the runner following main', () => {
 
 test('tb status says when the main key is still being rotated', () => {
   const now = Date.parse('2026-10-26T12:00:00.000Z');
-  const text = formatStatus({ version: '1', pid: 1, startedAt: '2026-10-26T11:00:00.000Z', home: '/h', logFile: '/h/l', liveClis: 0, running: [], sync: { state: 'ok', url: 'https://x.convex.cloud', name: 'm5', ownerKeyRotating: true } } as never, [], now);
+  const text = formatStatus({ version: '1', pid: 1, startedAt: '2026-10-26T11:00:00.000Z', home: '/h', logFile: '/h/l', liveClis: 0, running: [], sync: { state: 'ok', url: 'https://x.convex.cloud', name: 'laptop', ownerKeyRotating: true } } as never, [], now);
   assert.match(text, /RUNNER_KEY_NEXT/);
 });
 
 test('tb status says what a backend on this Mac only leaves out, and says nothing of it for cloud', () => {
   const now = Date.parse('2026-10-26T12:00:00.000Z');
-  const status = (url: string) => formatStatus({ version: '1', pid: 1, startedAt: '2026-10-26T11:00:00.000Z', home: '/h', logFile: '/h/l', liveClis: 0, running: [], sync: { state: 'ok', url, name: 'm5', pushOff: true } } as never, [], now);
+  const status = (url: string) => formatStatus({ version: '1', pid: 1, startedAt: '2026-10-26T11:00:00.000Z', home: '/h', logFile: '/h/l', liveClis: 0, running: [], sync: { state: 'ok', url, name: 'laptop', pushOff: true } } as never, [], now);
   assert.match(status('http://127.0.0.1:13210'), /On this Mac only: .*no phone or other Mac can reach it, and the website and share links only open on this Mac/);
   assert.ok(!status('https://mac.tail1.ts.net:3210').includes('On this Mac only'));
 });
@@ -783,7 +800,7 @@ test('tb status says what a backend on this Mac only leaves out, and says nothin
 test("tb status: a runner's first day of Convex use says what's been sent, not a monthly figure from minutes", () => {
   const now = Date.parse('2026-11-13T12:00:00.000Z');
   const status = (since: string) =>
-    formatStatus({ version: '1', pid: 1, startedAt: '2026-11-13T11:00:00.000Z', home: '/h', logFile: '/h/l', liveClis: 0, running: [], sync: { state: 'ok', url: 'https://x.convex.cloud', name: 'm5', use: { sent: 3e6, bodies: 1e6, io: 6e6, storage: 1.3e6, since } } } as never, [], now);
+    formatStatus({ version: '1', pid: 1, startedAt: '2026-11-13T11:00:00.000Z', home: '/h', logFile: '/h/l', liveClis: 0, running: [], sync: { state: 'ok', url: 'https://x.convex.cloud', name: 'laptop', use: { sent: 3e6, bodies: 1e6, io: 6e6, storage: 1.3e6, since } } } as never, [], now);
   const early = status('2026-11-13T11:30:00.000Z');
   assert.match(early, /Convex use, from this runner: 3 MB sent since .*a monthly estimate comes after its first day/);
   assert.ok(!early.includes('of I/O a month'), 'no monthly figure yet');

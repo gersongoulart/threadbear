@@ -26,6 +26,16 @@ function finished(h: ReturnType<typeof harness>) {
   return thread.id;
 }
 
+test('a single-thread virtual runner cannot publish a conversation fork', async () => {
+  const h = harness(), id = finished(h);
+  h.runner.boxThread = id;
+  const before = h.runner.threads.size;
+  assert.match((await h.runner.forkInfo(id)).reason ?? '', /virtual runner/i);
+  await assert.rejects(h.runner.forkThread(id, { workspace: 'same', requestId: crypto.randomUUID() }), /virtual runner/i);
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.runner.threads.size, before);
+});
+
 test('message fork stops displayed and native history at the selected completed reply', async () => {
   const h = harness(), id = finished(h);
   const before = h.runner.events(id).events;

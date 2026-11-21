@@ -1,12 +1,12 @@
-// Loose ends on the done card (experiment looseEnds; loose-ends.ts and
+// Loose ends on the done card (loose-ends.ts and
 // runner/loose-ends.ts): what's still open on a finished thread, checked
 // by the runner so a plain Archive is safe without asking the agent.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { makeHarness, tmpDir } from '../helpers/fakes.ts';
+import { sh, shPath } from '../helpers/platform.ts';
 import { checkSummary } from '../helpers/protocol-check.ts';
 import { PATIENCE_MS } from '../helpers/patience.ts';
 import { anyOpen, childLooseEnds, editedLooseEnds, githubRepo, runningLooseEnds, scheduleLooseEnds, worktreeLooseEnds, type Pr, type PrLookup } from '../../src/loose-ends.ts';
@@ -15,7 +15,6 @@ import { buildThreadbearTools } from '../../src/threadbear-mcp.ts';
 import { Scrubber } from '../../src/scrub.ts';
 import { useScrubForCuts } from '../../src/safe-cut.ts';
 import { redactSecrets, scrubText } from '../../src/redaction.ts';
-import { EXPERIMENTS } from '../../src/experiments.ts';
 import type { Schedule } from '../../src/protocol.ts';
 import type { WorktreeRecord } from '../../src/worktrees.ts';
 
@@ -30,10 +29,6 @@ Object.assign(process.env, {
 
 const END_TURN = 'mcp__threadbear__end_turn';
 
-function sh(cwd: string, cmd: string): string {
-  return execFileSync('/bin/sh', ['-c', cmd], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-}
-
 // A repo on main with a thread's worktree beside it, on its own branch.
 function repoWithWorktree(): WorktreeRecord {
   const root = fs.realpathSync(tmpDir('tb-loose-'));
@@ -41,7 +36,7 @@ function repoWithWorktree(): WorktreeRecord {
   fs.mkdirSync(main);
   sh(main, 'git init -q -b main && printf "node_modules\\n" > .gitignore && echo one > a.txt && git add -A && git commit -qm init');
   const wt = path.join(root, 'slot-1');
-  sh(main, `git worktree add -q -b thread/abcd1234 ${wt} main`);
+  sh(main, `git worktree add -q -b thread/abcd1234 ${shPath(wt)} main`);
   return { repo: 'proj', mainCheckout: main, path: wt, branch: 'thread/abcd1234', base: sh(main, 'git rev-parse main') };
 }
 
@@ -53,10 +48,8 @@ async function until(check: () => boolean, what: string): Promise<void> {
   }
 }
 
-function setup(on = true) {
-  const home = tmpDir();
-  if (on) fs.writeFileSync(path.join(home, 'runner.json'), JSON.stringify({ experiments: { looseEnds: true } }));
-  return makeHarness(home);
+function setup() {
+  return makeHarness(tmpDir());
 }
 
 function finish(h: ReturnType<typeof setup>, id: string, input: Record<string, unknown> = { needs: 'nothing' }) {
@@ -66,12 +59,6 @@ function finish(h: ReturnType<typeof setup>, id: string, input: Record<string, u
   s.text(`m${Math.random()}`, 'Done.');
   s.result('completed');
 }
-
-test('looseEnds: off by default, with a check-in booked', () => {
-  const x = EXPERIMENTS.find((e) => e.id === 'looseEnds');
-  assert.equal(x?.on, false);
-  assert.match(x?.reminder ?? '', /^[0-9a-f]{8}$/);
-});
 
 test('looseEnds: a worktree with nothing left says nothing; commits off main and uncommitted files are named', async () => {
   const w = repoWithWorktree();
@@ -93,7 +80,7 @@ test('looseEnds: a worktree with nothing left says nothing; commits off main and
   assert.deepEqual(await worktreeLooseEnds({ ...w, branch: 'thread/gone', path: path.join(w.path, 'nope') }), []);
 });
 
-test('looseEnds: threads it started count while working or waiting on Mike; check-ins are listed but leave Archive safe', () => {
+test('looseEnds: threads it started count while working or waiting on Alex; check-ins are listed but leave Archive safe', () => {
   const ends = childLooseEnds([
     { id: 'a', title: 'Fix the relay', working: true, needsYou: false },
     { id: 'b', title: 'Pick a picker', working: false, needsYou: true },
@@ -153,10 +140,72 @@ test('looseEnds: a done turn gets a check on its summary, kept up to date, and o
   assert.equal(s.looseEnds, undefined);
 });
 
-test('looseEnds: not checked when off, when the turn needs Mike, or when it archives itself', async () => {
-  const off = setup(false);
-  const a = off.runner.create({ text: 'Fix it', accountId: 'claude-main' }).thread.id;
-  finish(off, a);
+// 20 Nov 2026: a review-window fix ended its turn with its second review
+// round running in a shell and no end_turn. The sidebar had it under Running,
+// but its starter's done card said it "is waiting for you".
+test("looseEnds: a thread it started with a job in the background is still working, not waiting for Alex", async () => {
+  const h = setup();
+  const parent = h.runner.create({ text: 'Build the site', accountId: 'claude-main', cwd: fs.realpathSync(tmpDir('tb-loose-parent-')) }).thread.id;
+  finish(h, parent);
+  await until(() => Boolean(h.runner.get(parent).looseEnds), "the starter's check");
+  const child = h.runner.create({ text: 'Fix the review window', accountId: 'claude-main', cwd: fs.realpathSync(tmpDir('tb-loose-child-')), startedBy: { kind: 'thread', label: 'Agent', threadId: parent } }).thread.id;
+  const s = h.adapter.sessions.filter((x) => x.opts.threadId === child).at(-1)!;
+  s.init();
+  s.out({ kind: 'tasks', tasks: [{ id: 'b1', type: 'local_bash', kind: 'shell', description: 'Second review round' }] });
+  // Its turn ends with words and no end_turn: unread, and no card saying it needs nothing.
+  s.text('m1', 'The second round of reviews is running.');
+  s.result('completed');
+  const line = () => h.runner.get(parent).looseEnds?.ends.find((e) => e.threadId === child)?.text;
+  await until(() => Boolean(line()), 'the child listed');
+  assert.match(line()!, /is still working$/);
+  // Once the job is done and its turn asks nothing more, it's off the card.
+  (h.adapter as { wakesAfterTasks?: boolean }).wakesAfterTasks = false;
+  s.out({ kind: 'tasks', tasks: [] });
+  await until(() => /waiting for you$/.test(line() ?? ''), 'the child waiting once its job is done');
+  // A card asking Alex something wins over a job still going, as in the sidebar.
+  h.runner.send(child, 'and this');
+  const s2 = h.adapter.sessions.filter((x) => x.opts.threadId === child).at(-1)!;
+  s2.init();
+  s2.out({ kind: 'tasks', tasks: [{ id: 'b2', type: 'local_bash', kind: 'shell', description: 'npm test' }] });
+  finish(h, child, { needs: 'you', asks: [{ question: 'Deploy it?' }] });
+  await until(() => Boolean(h.runner.get(child).background?.length) && h.runner.get(child).needs === 'you', 'the ask with a job going');
+  h.runner.recheckLooseEnds(h.runner.threads.get(parent)!);
+  await until(() => /waiting for you$/.test(line() ?? ''), 'the ask winning');
+});
+
+test('looseEnds: a thread hibernating to wait for its own landing is checked again, so it leaves Running once landed', async () => {
+  const h = setup();
+  const parent = h.runner.create({ text: 'Plan it', accountId: 'claude-main' }).thread.id;
+  finish(h, parent);
+  await until(() => Boolean(h.runner.get(parent).looseEnds), "the starter's check");
+  const { thread } = h.runner.create({ text: 'Fix it', accountId: 'claude-main', startedBy: { kind: 'thread', label: 'Agent', threadId: parent } });
+  const id = thread.id;
+  const st = h.runner.threads.get(id)!;
+  const w = repoWithWorktree();
+  st.rec.worktree = w;
+  sh(w.path, 'echo two > b.txt && git add b.txt && git commit -qm two');
+  finish(h, id);
+  await until(() => Boolean(h.runner.get(id).looseEnds), 'the check');
+  await until(() => !h.runner.get(parent).looseEnds?.ends.some((e) => e.threadId === id), 'the child done');
+  // Its own agent hibernated it "until the landing finishes".
+  st.rec.snoozedUntil = '9999-12-31T00:00:00.000Z';
+  st.rec.wakeWhen = { said: 'when the landing finishes', topic: 'the landing has finished', by: 'agent' };
+  const s = h.runner.get(id);
+  assert.deepEqual(s.wakeWhen, { said: 'when the landing finishes', topic: 'the landing has finished', agent: true });
+  assert.deepEqual(checkSummary(s), []);
+  // Its starter's card counts it as still working.
+  h.runner.recheckStarter(st);
+  await until(() => Boolean(h.runner.get(parent).looseEnds?.ends.some((e) => e.threadId === id)), 'the child listed as working');
+  // A detached tb land puts it on main and tells nobody: the sweep sees it.
+  sh(w.mainCheckout, 'git merge -q --ff-only thread/abcd1234');
+  h.clock.advance(10_000);
+  h.runner.recheckWaitingToLand();
+  await until(() => h.runner.get(id).looseEnds?.ends.length === 0, 'nothing left to land');
+  // And its starter hears it's no longer working.
+  await until(() => !h.runner.get(parent).looseEnds?.ends.some((e) => e.threadId === id), 'the child gone from the card');
+});
+
+test('looseEnds: not checked when the turn needs Alex, or when it archives itself', async () => {
   const h = setup();
   const b = h.runner.create({ text: 'Fix it', accountId: 'claude-main' }).thread.id;
   finish(h, b, { needs: 'you', asks: [{ question: 'Deploy it?' }] });
@@ -166,7 +215,6 @@ test('looseEnds: not checked when off, when the turn needs Mike, or when it arch
   const d = h.runner.create({ text: 'Fix it', accountId: 'claude-main' }).thread.id;
   finish(h, d);
   await until(() => Boolean(h.runner.get(d).looseEnds), 'the control');
-  assert.equal(off.runner.get(a).looseEnds, undefined);
   assert.equal(h.runner.get(b).looseEnds, undefined);
   assert.equal(h.runner.get(c).looseEnds, undefined);
   assert.deepEqual(h.runner.get(d).looseEnds?.ends, []);
@@ -307,7 +355,7 @@ test('looseEnds: work pushed to a branch that main lacks is open until its PR is
   fs.mkdirSync(repo);
   sh(repo, `git init -q -b main && git remote add origin ${remote} && echo one > a.txt && git add -A && git commit -qm init && git push -q -u origin main && git remote set-head origin main`);
   const a = path.join(repo, 'a.txt');
-  sh(repo, 'git checkout -q -b mike/examples && echo two > a.txt && git commit -qam examples && git push -q -u origin mike/examples');
+  sh(repo, 'git checkout -q -b alex/examples && echo two > a.txt && git commit -qam examples && git push -q -u origin alex/examples');
   const sha = sh(repo, 'git rev-parse HEAD');
   const asked: string[] = [];
   const lookup = (pr: Pr | undefined): PrLookup => async (r, b) => {
@@ -316,7 +364,7 @@ test('looseEnds: work pushed to a branch that main lacks is open until its PR is
   };
   // A local remote isn't GitHub's, so there's no PR to ask about.
   assert.deepEqual(await editedLooseEnds([a], [], undefined, { pushed: [sha], prs: lookup(undefined) }), [
-    { kind: 'unmerged', text: "Work it pushed to mike/examples in website isn't on main" },
+    { kind: 'unmerged', text: "Work it pushed to alex/examples in website isn't on main" },
   ]);
   assert.deepEqual(asked, []);
   // On GitHub: an open PR names itself, a draft says so, a merged or closed
@@ -325,26 +373,26 @@ test('looseEnds: work pushed to a branch that main lacks is open until its PR is
   assert.deepEqual(await editedLooseEnds([a], [], undefined, { pushed: [sha], prs: lookup({ number: 1092, state: 'OPEN', isDraft: true }) }), [
     { kind: 'unmerged', text: 'PR #1092 in website is still a draft' },
   ]);
-  assert.deepEqual(asked, ['convex/website mike/examples']);
+  assert.deepEqual(asked, ['convex/website alex/examples']);
   assert.deepEqual(await editedLooseEnds([a], [], undefined, { pushed: [sha], prs: lookup({ number: 1092, state: 'OPEN', isDraft: false }) }), [
     { kind: 'unmerged', text: "PR #1092 in website isn't merged" },
   ]);
-  assert.deepEqual(await editedLooseEnds([a], [], undefined, { pushed: [sha], prs: lookup({ number: 1092, state: 'MERGED', isDraft: false, headRefOid: sh(repo, 'git rev-parse origin/mike/examples') }) }), []);
-  assert.deepEqual(await editedLooseEnds([a], [], undefined, { pushed: [sha], prs: lookup({ number: 1092, state: 'CLOSED', isDraft: false, headRefOid: sh(repo, 'git rev-parse origin/mike/examples') }) }), []);
+  assert.deepEqual(await editedLooseEnds([a], [], undefined, { pushed: [sha], prs: lookup({ number: 1092, state: 'MERGED', isDraft: false, headRefOid: sh(repo, 'git rev-parse origin/alex/examples') }) }), []);
+  assert.deepEqual(await editedLooseEnds([a], [], undefined, { pushed: [sha], prs: lookup({ number: 1092, state: 'CLOSED', isDraft: false, headRefOid: sh(repo, 'git rev-parse origin/alex/examples') }) }), []);
   // A branch reused after its PR merged: newer pushes aren't covered by it.
-  const merged = { number: 1092, state: 'MERGED' as const, isDraft: false, headRefOid: sh(repo, 'git rev-parse origin/mike/examples') };
-  sh(repo, 'echo three > a.txt && git commit -qam more && git push -q origin mike/examples');
+  const merged = { number: 1092, state: 'MERGED' as const, isDraft: false, headRefOid: sh(repo, 'git rev-parse origin/alex/examples') };
+  sh(repo, 'echo three > a.txt && git commit -qam more && git push -q origin alex/examples');
   const more = sh(repo, 'git rev-parse HEAD');
   assert.deepEqual(await editedLooseEnds([a], [], undefined, { pushed: [sha, more], prs: lookup(merged) }), [
-    { kind: 'unmerged', text: "Work it pushed to mike/examples in website isn't on main" },
+    { kind: 'unmerged', text: "Work it pushed to alex/examples in website isn't on main" },
   ]);
   // A thread that changed files only through a shell is found by its folder.
   assert.deepEqual(await editedLooseEnds([], [], undefined, { pushed: [more], dirs: [repo], prs: lookup(undefined) }), [
-    { kind: 'unmerged', text: "Work it pushed to mike/examples in website isn't on main" },
+    { kind: 'unmerged', text: "Work it pushed to alex/examples in website isn't on main" },
   ]);
   // Once main has it, there's nothing to ask.
   asked.length = 0;
-  sh(repo, 'git checkout -q main && git merge -q --ff-only mike/examples && git push -q origin main');
+  sh(repo, 'git checkout -q main && git merge -q --ff-only alex/examples && git push -q origin main');
   assert.deepEqual(await editedLooseEnds([a], [], undefined, { pushed: [sha, more], prs: lookup({ number: 1092, state: 'OPEN', isDraft: false }) }), []);
   assert.deepEqual(asked, []);
   assert.equal(githubRepo('git@github.com:convex/website.git'), 'convex/website');

@@ -8,6 +8,11 @@
 #   scripts/install-runner.sh              install (or reinstall) and start it
 #   scripts/install-runner.sh --print      print the plist and change nothing
 #   scripts/install-runner.sh --uninstall  stop it and remove the plist
+#   scripts/install-runner.sh --stage      put the new app, launch.mjs and
+#                                          plist in place without stopping
+#                                          anything; they take over the next
+#                                          time the LaunchAgent starts (the
+#                                          Mac restarting, logging in again)
 #
 # The runner runs from a release, never from this checkout: the plist
 # starts <home>/runner/launch.mjs, which starts the release
@@ -34,9 +39,22 @@
 # Options:
 #   --from-source  run src/main.ts straight from this checkout instead, as
 #                  before releases (for debugging the runner itself)
+#   --stage        the runner's own reinstall (src/reinstall.ts): no busy
+#                  check, no release built (the runner's updater keeps those
+#                  up to date), and nothing stopped or loaded. A new
+#                  Threadbear Runner.app is built beside the running one
+#                  (.Threadbear Runner.app.staged; launch.mjs moves it in
+#                  at the job's next start), launch.mjs copied in and
+#                  the plist rewritten; launchd reads them next time it
+#                  starts the job. On a Mac that's never idle that's the
+#                  only time one can go in without cutting threads short
+#                  (14 Nov 2026).
 #   --force        replace the running copy even if threads are busy
 #   --allow-branch install from a HEAD that isn't main's tip (its launch.mjs
 #                  and release)
+#   --skip-checks  build the release without its typecheck and unit tests,
+#                  for a commit that's already been checked (setup passes
+#                  it for Mike's code as it is in his repo)
 #   --home DIR     data dir (default ~/Library/Application Support/Threadbear)
 #   --label LABEL  launchd label (default com.mikerosoft.threadbear.runner)
 #   --port N       port to listen on (default: the one in runner.json, else
@@ -78,8 +96,10 @@ PORT=""
 AGENT_PATH=""
 RUNNER_APP="${THREADBEAR_RUNNER_APP_DIR:-}"
 FROM_SOURCE=0
+STAGE=0
 FORCE=0
 ALLOW_BRANCH=0
+SKIP_CHECKS=0
 HOME_GIVEN=0
 MODE="install"
 ARGS=("$@")
@@ -89,8 +109,10 @@ while [ $# -gt 0 ]; do
     --print) MODE="print" ;;
     --uninstall) MODE="uninstall" ;;
     --from-source) FROM_SOURCE=1 ;;
+    --stage) STAGE=1 ;;
     --force) FORCE=1 ;;
     --allow-branch) ALLOW_BRANCH=1 ;;
+    --skip-checks) SKIP_CHECKS=1 ;;
     --home) DATA_HOME="${2:?--home needs a folder}"; HOME_GIVEN=1; shift ;;
     --label) LABEL="${2:?--label needs a launchd label}"; shift ;;
     --port) PORT="${2:?--port needs a number}"; shift ;;
@@ -102,6 +124,10 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+if [ "$STAGE" = 1 ] && { [ "$MODE" != "install" ] || [ "$FROM_SOURCE" = 1 ]; }; then
+  echo "--stage only goes with a plain install (not --print, --uninstall or --from-source)." >&2
+  exit 1
+fi
 
 # Only once the arguments are read, so --node wins. Uninstalling needs no
 # Node, so a missing one is said where installing needs it, below.
@@ -500,7 +526,13 @@ if [ "$FROM_SOURCE" = 0 ] && [ "$ALLOW_BRANCH" = 0 ] && ! deploy --check-branch;
 fi
 # Replacing a running copy stops its CLIs, and every turn and background
 # job with them, so only when nothing is busy.
-if [ "$LOADED" = 1 ] && [ "$FORCE" = 0 ]; then
+# Staging something that isn't installed would leave a plist launchd never
+# loaded, or a launch.mjs with no release to start.
+if [ "$STAGE" = 1 ] && { [ "$LOADED" = 0 ] || [ ! -f "$RDIR/launch.mjs" ] || [ ! -L "$RDIR/current" ]; }; then
+  echo "$LABEL isn't installed and running releases, so there's nothing to stage over. Run this without --stage." >&2
+  exit 1
+fi
+if [ "$LOADED" = 1 ] && [ "$FORCE" = 0 ] && [ "$STAGE" = 0 ]; then
   if [ "$LAUNCH_OK" = 0 ]; then
     echo "$RUNNER_DIR/launch.mjs doesn't load (above), so this can't check whether threads are busy. Fix it, or add --force." >&2
     exit 1
@@ -527,24 +559,91 @@ rm -f "$PREV" "$PREV_LAUNCH"
 # The app the plist runs, built only when it's missing or launcher/
 # changed since (its signature is what privacy grants are tied to, so the
 # fewer rebuilds the better; a rebuild signs it the same way regardless).
-# build-launcher.sh leaves the old app next to the new one as
-# .Threadbear Runner.app.old, so a failed install can put it back.
+# The new one is built beside it (STAGED_APP below), and a full install
+# keeps the old one as .Threadbear Runner.app.old until it's done, so a
+# failed install can put it back.
+# Staging writes the plist first, to a temp file beside it, so a
+# LaunchAgents folder it can't write to fails before the app or launch.mjs
+# change: one of those going in alone would make the runner's check see main
+# and stop saying anything was wrong, with the old plist still there.
+STAGED_PLIST=""
+# The Node the job runs on now. Staging a different one would leave
+# deploy-runner.sh checking releases on the staged Node (it reads the plist)
+# while the running supervisor starts them on its own until the next login,
+# so a Node change goes in by a full reinstall instead.
+if [ "$STAGE" = 1 ] && [ -f "$PLIST" ]; then
+  if [ "$LINUX" = 1 ]; then
+    PINNED="$(sed -n 's/^ExecStart="\([^"]*\)".*/\1/p' "$PLIST" | head -n 1)"
+  else
+    PINNED="$(plutil -extract ProgramArguments.1 raw -o - "$PLIST" 2>/dev/null || true)"
+  fi
+  if [ -n "$PINNED" ] && [ "$PINNED" != "$NODE" ]; then
+    echo "The LaunchAgent runs on $PINNED, and this would stage $NODE. Changing the Node needs a full reinstall: run this without --stage once no thread is busy." >&2
+    exit 1
+  fi
+fi
+if [ "$STAGE" = 1 ]; then
+  STAGED_PLIST="$(mktemp "$PLIST.XXXXXX")" || { echo "Couldn't write to $AGENTS_DIR, so nothing was changed." >&2; exit 1; }
+  # Not left in LaunchAgents if a step below stops this (once it's moved
+  # into place there's nothing at this name to remove).
+  trap 'rm -f "$STAGED_PLIST"' EXIT
+  if ! job_file > "$STAGED_PLIST" || { [ "$LINUX" = 0 ] && ! plutil -lint "$STAGED_PLIST" >/dev/null; }; then
+    rm -f "$STAGED_PLIST"
+    echo "Couldn't write the new plist, so nothing was changed." >&2
+    exit 1
+  fi
+fi
 OLD_APP="$(dirname "$RUNNER_APP")/.$(basename "$RUNNER_APP").old"
+# A new app is built here, beside the one the job runs, never over it:
+# macOS checks the job's program against its bundle on disk for every
+# privacy grant anything under it asks for, so a bundle replaced under a
+# running launcher fails them all (Screen Recording in agents' shells,
+# 15 Nov 2026) until the job restarts. A full install moves it in once the
+# job is about to be reloaded (take_staged_app); a staged one is moved in
+# by launch.mjs when launchd next starts the job (takeStagedApp there).
+STAGED_APP="$(dirname "$RUNNER_APP")/.$(basename "$RUNNER_APP").staged"
+APP_STAGED=0
 APP_BUILT=0
-[ "$LINUX" = 1 ] || rm -rf "$OLD_APP"
+# $OLD_APP isn't cleared here: a launcher started before it was moved aside
+# may still run from it (take_staged_app clears it once the job stops).
 if [ "$LINUX" = 1 ]; then
   # No app on Linux: nothing there asks for privacy grants.
   :
 elif why="$(bash "$BUILD_LAUNCHER" --check "$RUNNER_APP")"; then
   echo "Keeping $RUNNER_APP, built from launcher/ as it is."
+  # One staged before launcher/ went back to what's running is out of date.
+  rm -rf "$STAGED_APP"
+elif bash "$BUILD_LAUNCHER" --check "$STAGED_APP" >/dev/null; then
+  echo "$why A new one is already staged beside it."
+  APP_STAGED=1
 else
   echo "$why"
-  if ! bash "$BUILD_LAUNCHER" "$RUNNER_APP"; then
+  if ! bash "$BUILD_LAUNCHER" "$STAGED_APP"; then
+    rm -rf "$STAGED_APP"
     echo "Threadbear Runner.app didn't build, so nothing was changed." >&2
     exit 1
   fi
-  APP_BUILT=1
+  # build-launcher.sh keeps what was at a path it builds over; a staged
+  # app it replaced isn't worth keeping.
+  rm -rf "$(dirname "$STAGED_APP")/.$(basename "$STAGED_APP").old"
+  APP_STAGED=1
 fi
+
+# Moves the staged app in, the old one aside as $OLD_APP for fail_back,
+# only once nothing runs from the old one any more (or is about to stop).
+take_staged_app() {
+  [ "$APP_STAGED" = 1 ] || return 0
+  APP_STAGED=0
+  # Gone already when the job restarted while this was building a release:
+  # launch.mjs took it in then, so the app in place is the new one.
+  [ -d "$STAGED_APP" ] || return 0
+  rm -rf "$OLD_APP"
+  # APP_BUILT as soon as the old one is aside, so fail_back puts it back
+  # even if the second rename fails.
+  if [ -e "$RUNNER_APP" ]; then mv "$RUNNER_APP" "$OLD_APP"; APP_BUILT=1; fi
+  mv "$STAGED_APP" "$RUNNER_APP"
+  APP_BUILT=1
+}
 
 if [ "$FROM_SOURCE" = 1 ]; then
   if [ ! -d "$RUNNER_DIR/node_modules/@anthropic-ai/claude-agent-sdk" ] || [ ! -d "$RUNNER_DIR/node_modules/ws" ]; then
@@ -566,13 +665,16 @@ else
   # when it was built from HEAD.
   [ ! -L "$RDIR/current" ] || OLD_CURRENT="$(basename "$(readlink "$RDIR/current")")"
   HEAD_COMMIT="$(git -C "$RUNNER_DIR" rev-parse HEAD 2>/dev/null || true)"
-  if [ -n "$OLD_CURRENT" ] && [ -n "$HEAD_COMMIT" ] && [ "$(release_commit "$RDIR/current/release.json")" = "$HEAD_COMMIT" ]; then
+  if [ "$STAGE" = 1 ]; then
+    echo "Leaving release ${OLD_CURRENT:-?} as it is; the runner's updater keeps releases up to date."
+  elif [ -n "$OLD_CURRENT" ] && [ -n "$HEAD_COMMIT" ] && [ "$(release_commit "$RDIR/current/release.json")" = "$HEAD_COMMIT" ]; then
     echo "Keeping release $OLD_CURRENT, which was built from HEAD."
   else
     [ -z "$OLD_CURRENT" ] || echo "Release $OLD_CURRENT wasn't built from HEAD, so building one that is."
-    BRANCH_ARG=()
-    [ "$ALLOW_BRANCH" = 0 ] || BRANCH_ARG=(--allow-branch)
-    if ! deploy --no-restart ${BRANCH_ARG[@]+"${BRANCH_ARG[@]}"}; then
+    DEPLOY_ARGS=()
+    [ "$ALLOW_BRANCH" = 0 ] || DEPLOY_ARGS=(--allow-branch)
+    [ "$SKIP_CHECKS" = 0 ] || DEPLOY_ARGS+=(--skip-checks)
+    if ! deploy --no-restart ${DEPLOY_ARGS[@]+"${DEPLOY_ARGS[@]}"}; then
       rm -f "$NEW_LAUNCH"
       exit 1
     fi
@@ -635,16 +737,30 @@ fail_back() {
   exit 1
 }
 
+if [ "$STAGE" = 1 ]; then
+  # Each file goes in whole (a temp file and a rename), and nothing is
+  # stopped or loaded, so nothing needs putting back if a step fails: the
+  # running job carries on as it was, and the next run of this stages
+  # again. The app, if it changed, waits beside the running one as
+  # $STAGED_APP; launch.mjs moves it in when launchd next starts the job.
+  mv "$STAGED_PLIST" "$PLIST"
+  mv -f "$NEW_LAUNCH" "$RDIR/launch.mjs"
+  # systemd keeps a unit's old text until told; this rereads it without
+  # restarting anything.
+  [ "$LINUX" = 0 ] || "$SYSTEMCTL" --user daemon-reload 2>/dev/null || true
+  if [ "$SANDBOX" = 0 ]; then bash "$RUNNER_DIR/scripts/link-tb.sh" "$DATA_HOME" "$NODE" "$RUNNER_DIR" || true; fi
+  echo "Staged $LABEL: the new app, launch.mjs and plist are in place, and nothing was stopped."
+  echo "They take over the next time the LaunchAgent starts (the Mac restarting, or logging in again)."
+  exit 0
+fi
+
 # Building the app and a release can take minutes, and a thread may have
 # started meanwhile (the runner reinstalling itself starts this unattended),
 # so busy is asked again right before anything is stopped. Only the app is
 # changed by then; it goes back, and the release just built stays for the
 # runner's next restart, as one its updater built would.
 if [ "$LOADED" = 1 ] && [ "$FORCE" = 0 ] && ! deploy --check-idle; then
-  if [ "$APP_BUILT" = 1 ] && [ -d "$OLD_APP" ]; then
-    rm -rf "$RUNNER_APP"
-    mv "$OLD_APP" "$RUNNER_APP"
-  fi
+  # The app built is left staged, for the next run (or launchd's next start).
   [ -z "$NEW_LAUNCH" ] || rm -f "$NEW_LAUNCH"
   echo "A thread got busy while this was building, so the running $LABEL wasn't replaced. Run this again once it finishes, or add --force." >&2
   exit "$BUSY_EXIT"
@@ -671,8 +787,11 @@ job_file > "$TMP"
 mv "$TMP" "$PLIST"
 TMP=""
 
-# The runner stops its CLIs on SIGTERM; threads that were mid-turn show as
-# stopped and resume on the next message.
+# The new app goes in now: reload stops the job straight after, so the old
+# app's last seconds are spent stopping. The runner stops its CLIs on
+# SIGTERM; threads that were mid-turn show as stopped and resume on the
+# next message.
+take_staged_app
 reload || fail_back "launchd wouldn't load the new plist."
 
 echo "Installed $LABEL"

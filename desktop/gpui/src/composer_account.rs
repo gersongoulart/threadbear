@@ -28,7 +28,10 @@ impl Composer {
         let data = self.chip_data(cx);
         let selected = data.summary.as_ref().map(|t| t.account_id.clone()).unwrap_or_default();
         let now = threadbear_core::chrono::Local::now();
-        let sections = login_sections(&data.logins.accounts, &selected, &now);
+        let mut sections = login_sections(&data.logins.accounts, &selected, &now);
+        for section in &mut sections {
+            section.title = data.logins.provider_title(&section.id);
+        }
         let footer = threadbear_core::usage::source_line(&data.logins.accounts, now.timestamp_millis(), &threadbear_core::chrono::Local);
         (sections, footer)
     }
@@ -79,7 +82,7 @@ pub(crate) fn picker(composer: WeakEntity<Composer>, window: &mut Window, cx: &m
 fn login_row(item: &LoginItem, _window: &mut Window, cx: &App, action: impl Fn(&mut Window, &mut App) + 'static) -> impl IntoElement {
     use gpui_kit::base::TestSupportExt as _;
     let subtitle_color = match item.badge {
-        Some(ChipBadge::Blocked) => cx.theme().danger,
+        Some(ChipBadge::Blocked | ChipBadge::SignedOut | ChipBadge::PlanEnded) => cx.theme().danger,
         Some(ChipBadge::Low(_)) => style::needs_you(cx),
         None => style::secondary_label(cx),
     };

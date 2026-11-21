@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { tmpDir } from '../helpers/fakes.ts';
 import { FakeClock } from '../../src/clock.ts';
 import { nullLogger } from '../../src/log.ts';
-import { GPUI_SHARED, scanSwiftChanges, SwiftChanges } from '../../src/swift-changes.ts';
+import { firstLookMessage, GPUI_SHARED, scanSwiftChanges, SwiftChanges } from '../../src/swift-changes.ts';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const ENV = { ...process.env, GIT_AUTHOR_NAME: 'Them', GIT_AUTHOR_EMAIL: 'them@example.com', GIT_COMMITTER_NAME: 'Them', GIT_COMMITTER_EMAIL: 'them@example.com', GIT_CONFIG_GLOBAL: '/dev/null' };
@@ -91,6 +91,15 @@ test("finds the fork's own Swift commits and nothing of Mike's", async () => {
   assert.match(st.changes[1].date, /^\d{4}-\d{2}-\d{2}T/);
 });
 
+test('a commit that changed the new app too is already in it, so it is not listed', async () => {
+  const w = world();
+  // Made before the freeze in both apps at once (a fork's Zed button, 12 Nov):
+  // nothing to rebuild, and no Ports: trailer to take it off the list.
+  commit(w.theirs, ['app/Sources/Threadbear/Views/Header.swift', 'desktop/gpui/src/header.rs'], 'Zed button in both apps');
+  const st = await scanSwiftChanges(w.theirs);
+  assert.deepEqual(st.changes.map((c) => c.subject), ['Orange dock badge', 'Bigger sidebar font']);
+});
+
 test("in Mike's own copy it's off, and with nothing of upstream's to compare with too", async () => {
   const w = world();
   git(w.theirs, 'remote', 'set-url', 'origin', 'https://github.com/mikecann/threadbear');
@@ -168,4 +177,10 @@ test('what the GPUI app still uses from app/ matches swift-freeze.sh', () => {
   const r = spawnSync('bash', [path.join(REPO, 'scripts', 'swift-freeze.sh'), '--gpui-shared'], { encoding: 'utf8' });
   assert.equal(r.status, 0);
   assert.equal(GPUI_SHARED.source.replace(/\\\//g, '/'), r.stdout.trim());
+});
+
+test('a change is dated the day it was made where it was made, not in UTC', () => {
+  // 7:49 am on 15 Nov in Perth is still 14 Nov in UTC (Tinker Desk's try, 15 Nov).
+  const text = firstLookMessage([{ commit: 'a'.repeat(40), short: 'aaaaaaa', subject: 'Say Just woke up', date: '2026-11-15T07:49:47+08:00', files: ['app/x.swift'] }]);
+  assert.match(text, /\(15 Nov 2026\)/);
 });

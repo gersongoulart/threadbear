@@ -15,8 +15,8 @@ use crate::open_gate::Origin;
 use crate::style::{self, px};
 use crate::{call, now_ms};
 use gpui_kit::component::input::{InputEvent, TextareaState};
-use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Sizable as _, StyledExt as _};
+use crate::spinner::Spinner;
+use gpui_kit::component::{h_flex, v_flex, Sizable as _, StyledExt as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use serde_json::{json, Value};
@@ -55,7 +55,7 @@ pub(crate) struct DecisionCard {
     /// The boxes under "Something else", by ask.
     inputs: HashMap<usize, Entity<TextareaState>>,
     subs: Vec<Subscription>,
-    style: Option<((bool, u32), gpui_kit::base::TextViewStyle)>,
+    style: Option<(crate::style::ReadingStyleKey, gpui_kit::base::TextViewStyle)>,
 }
 
 impl DecisionCard {
@@ -110,7 +110,12 @@ impl DecisionCard {
         if answers.is_empty() {
             return;
         }
-        let text = composer::answers_message(&self.asks, &self.picks, &self.notes, "");
+        // Drafts he changed in the thread's replies go too (draft_boxes.rs).
+        let edits = crate::draft_boxes::unsent_edits(&self.thread, cx);
+        let text = composer::answers_message(&self.asks, &self.picks, &self.notes, &edits);
+        if !edits.is_empty() {
+            crate::draft_boxes::note_edits_sent(&self.thread, cx);
+        }
         let images = composer::note_images(&self.asks, &self.picks, &self.notes);
         let answers_json = Value::Array(answers.iter().map(|(_, a)| json!({ "action": a.action, "answer": a.answer })).collect());
         let words: Vec<String> = answers.iter().map(|(_, a)| a.answer.clone()).collect();
@@ -159,7 +164,7 @@ impl AskHost for DecisionCard {
     }
 
     fn ask_reading_style(&mut self, cx: &App) -> gpui_kit::base::TextViewStyle {
-        let key = (cx.theme().is_dark(), style::zoom_percent());
+        let key = crate::style::reading_style_key(cx);
         match &self.style {
             Some((k, style)) if *k == key => style.clone(),
             _ => {
@@ -201,6 +206,15 @@ impl AskHost for DecisionCard {
     /// anything else opens where it opens (the browser, its own app), as the
     /// page has no pane of the thread's.
     fn ask_open_link(&mut self, target: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // Another thread (an ask whose step is there) opens in the app, not
+        // through the open gate as an address.
+        if let Some((_, id)) = target.split_once(':').filter(|(scheme, _)| scheme.eq_ignore_ascii_case("thread")) {
+            let id = id.to_owned();
+            if let Some(app) = self.app.upgrade() {
+                app.update(cx, |app, cx| app.open_thread_link(&id, window, cx));
+            }
+            return;
+        }
         if target.starts_with("review:") {
             let thread = self.thread.clone();
             if let Some(app) = self.app.upgrade() {
@@ -223,7 +237,7 @@ impl AskHost for DecisionCard {
         let input = cx.new(|cx| TextareaState::new(window, cx).placeholder("Say something else…").auto_grow(1, 8).submit_on_enter(true));
         // Its words are only here until they're sent, what was typed before
         // too: an update's restart waits for them (unsent.rs).
-        crate::unsent::watch(&input, "a decision's Something else box on a project's page", cx);
+        crate::unsent::watch_in(&input, "a Something else box on a project's page", Some(self.thread.clone()), cx);
         if !existing.is_empty() {
             input.update(cx, |s, cx| s.set_value(existing, window, cx));
         }

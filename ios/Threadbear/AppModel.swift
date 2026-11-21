@@ -11,7 +11,10 @@ final class AppModel {
     private(set) var pairing: Pairing?
     private(set) var backend: (any Backend)?
     private(set) var runners: [PhoneRunner] = []
-    /// The projects by id, for the rows' icons (backend API 5 carries them).
+    /// The projects by runner and id (projectKey), for the rows' icons
+    /// (backend API 5 carries them). A project id is only its runner's own:
+    /// another runner can use the same one, so a thread's project is looked
+    /// up under the thread's own runner (Daybreak finding 141).
     private(set) var projects: [String: PhoneProject] = [:]
     /// The logins and their models (backend API 20), for the new thread pickers.
     private(set) var accounts: [PhoneAccount] = []
@@ -39,6 +42,9 @@ final class AppModel {
     @ObservationIgnored var threadOpen = false
     /// Rows sinking towards the Hibernating heading on their way out (`hibernate`).
     private(set) var sinking: Set<String> = []
+    /// Renamed from this phone: the new title shows at once, and goes back
+    /// if the runner refuses it (`rename`).
+    private(set) var renamed: [String: String] = [:]
     /// Hibernated from this phone, kept out of the lists and on the heading's
     /// count until Convex catches up.
     private(set) var tucks = Tucks()
@@ -77,6 +83,7 @@ final class AppModel {
     var hasMessagePages: Bool { (apiVersion ?? 0) >= BackendCompatibility.messagePagesAPIVersion }
     /// Whether to ask for the lines a thread writes when its login runs out
     /// (role `note`): an older backend refuses the argument.
+    var hasDesignReviews: Bool { isFake || (apiVersion ?? 0) >= BackendCompatibility.designReviewsAPIVersion }
     var hasLoginNotes: Bool { (apiVersion ?? 0) >= BackendCompatibility.loginNotesAPIVersion }
 
     /// Archived threads past the den's newest 100 with these words in
@@ -431,8 +438,8 @@ final class AppModel {
         #if DEBUG
         // `-ThreadbearPair <link>`: pair on launch, since the simulator asks
         // "Open in Threadbear?" for links from outside and nothing can tap it.
-        if let i = args.firstIndex(of: "-ThreadbearPair"), i + 1 < args.count, let link = URL(string: args[i + 1]) {
-            Task { await pair(with: link) }
+        if let i = args.firstIndex(of: "-ThreadbearPair"), i + 1 < args.count, let offered = Pairing.parse(args[i + 1], allowLocal: Self.allowLocalPairing) {
+            Task { await pair(with: offered) }
         }
         // `-ThreadbearOpen <threadId>`: start on that thread, for screenshots.
         if let i = args.firstIndex(of: "-ThreadbearOpen"), i + 1 < args.count { openThreadId = args[i + 1] }
@@ -796,7 +803,10 @@ final class AppModel {
         return "\(name) offline since \(RelativeTime.clock(newest.lastSeenAt, now: now))"
     }
 
-    func project(_ id: String) -> PhoneProject? { projects[id] }
+    /// A thread's project: the one with that id on the thread's own runner.
+    func project(_ id: String, runnerId: String) -> PhoneProject? { projects[Self.projectKey(runnerId: runnerId, id: id)] }
+
+    static func projectKey(runnerId: String, id: String) -> String { "\(runnerId)\n\(id)" }
 
     func runnerName(_ runnerId: String) -> String? {
         runners.count > 1 ? runners.first { $0.runnerId == runnerId }?.name : nil
@@ -815,35 +825,43 @@ final class AppModel {
     /// A yes is being checked with the server, for the pair screen's spinner.
     private(set) var isPairing = false
 
-    /// Every pairing link, from the Camera, the pair screen's scanner or the
-    /// clipboard, starts here: it's held for a yes and nothing is saved yet,
-    /// paired or not (an expired token used to let a link straight in).
-    func askToPair(_ link: URL) {
+    /// Every pairing code or link, from the pair screen's scanner, the
+    /// clipboard or another app, starts here: it's held for a yes and nothing
+    /// is saved yet, paired or not (an expired token used to let a link
+    /// straight in). One another app opened is never taken (Daybreak 127).
+    func askToPair(_ text: String, from source: PairingSource) {
         lastError = nil
-        switch pairingGate.ask(link, allowLocal: Self.allowLocalPairing, current: pairing ?? PairingStore.load(),
+        switch pairingGate.ask(text, from: source, allowLocal: Self.allowLocalPairing, current: pairing ?? PairingStore.load(),
                                keys: { Self.runnerKeys(for: $0) }) {
         case .asking: break
-        case .notPairing: lastError = "That link isn't a Threadbear pairing link."
-        case .busy: lastError = "Answer the pairing question first, then open the link again."
+        case .notPairing: lastError = "That isn't a Threadbear pairing code."
+        case .busy: lastError = "Answer the pairing question first, then scan the code again."
+        case .oldLink: lastError = "That code is from an older Threadbear on your Mac, which puts the phone's token in it. Update Threadbear on your Mac, then show the code again."
+        case .opened: lastError = "Threadbear doesn't pair from links other apps open. Scan the code on your Mac from Threadbear's own pairing screen instead."
         }
     }
 
     /// Mike said yes to `shown`. Synchronous, so the request is taken before
     /// the alert's dismissal cancels the gate.
     func acceptPairing(_ shown: PairingRequest) {
-        pairingGate.accept(shown) { [weak self] request in await self?.pair(with: request.link) }
+        pairingGate.accept(shown) { [weak self] request in await self?.pair(with: request.pairing) }
     }
 
-    /// From a `threadbear://pair` link Mike said yes to (or `-ThreadbearPair`
-    /// in a Debug build): checks the token works before keeping it.
-    private func pair(with link: URL) async {
-        guard let pairing = Pairing.parse(link, allowLocal: Self.allowLocalPairing) else {
-            lastError = "That link isn't a Threadbear pairing link."
-            return
-        }
+    /// From a pairing Mike said yes to (or `-ThreadbearPair` in a Debug
+    /// build): trades its one-use code for the token, if it has one, and
+    /// checks the token works before keeping it.
+    private func pair(with offered: Pairing) async {
         isPairing = true
         defer { isPairing = false }
-        let backend = ConvexBackend(deploymentURL: pairing.deploymentURL, token: pairing.token)
+        let transport = ConvexMobileTransport(deploymentURL: offered.deploymentURL)
+        let pairing: Pairing
+        do {
+            pairing = try await offered.claimed(with: transport)
+        } catch {
+            lastError = "The server didn't take that pairing code: \(error.localizedDescription)"
+            return
+        }
+        let backend = ConvexBackend(transport: transport, token: pairing.token)
         do {
             _ = try await backend.me()
             PairingStore.save(pairing)
@@ -993,8 +1011,7 @@ final class AppModel {
         if !isFake { pocket = PocketStore.standard.load() }
         tasks.append(follow(backend.runners()) { $0.receiveRunners($1) })
         tasks.append(follow(backend.projects()) { model, list in
-            // Two runners could use the same id; the first one wins.
-            model.projects = Dictionary(list.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            model.projects = Dictionary(list.map { (AppModel.projectKey(runnerId: $0.runnerId ?? "", id: $0.id), $0) }, uniquingKeysWith: { first, _ in first })
         })
         loaded = []
         followLists()
@@ -1205,6 +1222,36 @@ final class AppModel {
 
     /// The thread's turn is over: its Stop is done.
     func stopped(_ threadId: String) { stopping.remove(threadId) }
+
+    /// A thread's title as shown here: one just typed on this phone until
+    /// Convex has it, else the thread's own.
+    func title(of thread: PhoneThread) -> String {
+        let title = renamed[thread.threadId] ?? thread.title
+        return title.isEmpty ? "Untitled" : title
+    }
+
+    /// Renames a thread, showing the new title straight away. The runner
+    /// applies it as the Mac's rename does; a refusal puts the old one back
+    /// with the error.
+    func rename(_ threadId: String, to title: String) {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let backend, !title.isEmpty else { return }
+        renamed[threadId] = title
+        Task {
+            do {
+                let command = try await Deadline.run(seconds: 20) { try await backend.update(threadId: threadId, change: .rename(title)) }
+                if let status = await commandOutcome(command), status.state == .failed {
+                    throw TransportError.server(status.note ?? "The runner couldn't rename that thread.")
+                }
+                // Done: the live thread carries the new title within a moment.
+                try? await Task.sleep(for: .seconds(3))
+            } catch {
+                report(error)
+            }
+            // A later rename may have replaced this one meanwhile.
+            if renamed[threadId] == title { renamed[threadId] = nil }
+        }
+    }
 
     func clearError() { lastError = nil }
 

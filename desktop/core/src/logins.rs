@@ -54,6 +54,30 @@ pub struct Account {
     /// Where the login's CLI keeps its sign-in, for Sign in… (sign_in.rs).
     #[serde(default, deserialize_with = "crate::wire::field")]
     pub config_dir: String,
+    /// Claude: no turn can run on it until someone signs it in again
+    /// (docs/protocol.md, Pools, "Signed out"). Pools skip it.
+    #[serde(default, deserialize_with = "crate::wire::field")]
+    pub signed_out: bool,
+    /// Claude: when this sign-in ends and can't be renewed (28 days after
+    /// signing in, from Claude Code 2.1.325). The Usage panel warns ahead.
+    #[serde(default, deserialize_with = "crate::wire::field")]
+    pub login_ends_at: Option<String>,
+    /// Claude: its paid plan has lapsed to the free one, which has no Claude
+    /// Code. Pools skip it; nothing offers Sign in… or a reset for it.
+    #[serde(default, deserialize_with = "crate::wire::field")]
+    pub plan_ended: bool,
+    /// Claude: runs on a year-long token Mike made for it (Year-long token…
+    /// on its Usage row, sign_in.rs), not its 28-day sign-in. The token
+    /// itself never comes to the app.
+    #[serde(default, deserialize_with = "crate::wire::field")]
+    pub year_token: Option<YearToken>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct YearToken {
+    #[serde(default, deserialize_with = "crate::wire::field")]
+    pub made_at: Option<String>,
 }
 
 impl Account {
@@ -125,10 +149,30 @@ impl RunnerDefaults {
     }
 }
 
+/// Fields the runner reports about a provider. Options preserve the older
+/// runner fallback independently for each missing or unreadable field.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProviderInfo {
+    #[serde(deserialize_with = "crate::wire::id")]
+    pub id: String,
+    #[serde(deserialize_with = "crate::wire::field")]
+    pub name: Option<String>,
+    #[serde(deserialize_with = "crate::wire::field")]
+    pub cli_name: Option<String>,
+    #[serde(deserialize_with = "crate::wire::field")]
+    pub effort: Option<String>,
+    #[serde(deserialize_with = "crate::wire::field")]
+    pub auto_mode: Option<String>,
+    #[serde(deserialize_with = "crate::wire::field")]
+    pub rewind: Option<bool>,
+}
+
 /// A runner's logins (RunnerLogins), filled from its `hello`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RunnerLogins {
     pub accounts: Vec<Account>,
+    pub providers: Vec<ProviderInfo>,
     pub pools: Vec<Pool>,
     pub defaults: RunnerDefaults,
     /// Sign-in commands declared by this runner, replaced on every hello.
@@ -145,12 +189,83 @@ impl RunnerLogins {
             let command = p["loginCommand"].as_str()?;
             Some((id.to_owned(), command.trim().to_owned()))
         }).collect();
-        RunnerLogins { accounts: accounts_from(&hello["accounts"]), pools: pools_from(&hello["pools"]), defaults: hello.get("defaults").cloned().and_then(crate::wire::read).unwrap_or_default(), login_commands }
+        RunnerLogins { accounts: accounts_from(&hello["accounts"]), providers: lossy(&hello["providers"]), pools: pools_from(&hello["pools"]), defaults: hello.get("defaults").cloned().and_then(crate::wire::read).unwrap_or_default(), login_commands }
+    }
+
+    pub fn provider(&self, id: &str) -> Option<&ProviderInfo> {
+        let id = if id.is_empty() { "claude" } else { id };
+        self.providers.iter().find(|p| p.id == id)
+    }
+
+    pub fn provider_title(&self, id: &str) -> String {
+        self.provider(id).and_then(|p| p.name.as_deref()).filter(|n| !n.trim().is_empty()).map_or_else(|| provider_title(id), str::to_owned)
+    }
+
+    pub fn cli_name(&self, id: &str) -> String {
+        self.provider(id).and_then(|p| p.cli_name.as_deref()).filter(|n| !n.trim().is_empty()).map_or_else(|| crate::slash::cli_name(id), str::to_owned)
+    }
+
+    pub fn has_auto_mode(&self, id: &str) -> bool {
+        match self.provider(id).and_then(|p| p.auto_mode.as_deref()) {
+            Some("classifier") => true,
+            Some("asks") => false,
+            _ => has_auto_mode(id),
+        }
+    }
+
+    pub fn can_rewind(&self, id: &str) -> bool {
+        self.provider(id).and_then(|p| p.rewind).unwrap_or_else(|| crate::composer::can_rewind(id))
+    }
+
+    pub fn effort_levels(&self, model: Option<&str>, choices: &[ModelChoice], provider: &str) -> Vec<String> {
+        // No effort support is authoritative, even if a cached model still
+        // lists levels. Otherwise the model can narrow the provider's list.
+        if self.provider(provider).and_then(|p| p.effort.as_deref()) == Some("none") {
+            return Vec::new();
+        }
+        if let Some(choice) = model.and_then(|m| choice_for(m, choices)).filter(|c| !c.effort_levels.is_empty()) {
+            return choice.effort_levels.clone();
+        }
+        match self.provider(provider).and_then(|p| p.effort.as_deref()) {
+            Some("none") => Vec::new(),
+            Some("claude") => EFFORT_LEVELS.iter().map(|s| s.to_string()).collect(),
+            Some("codex") => CODEX_EFFORT_LEVELS.iter().map(|s| s.to_string()).collect(),
+            _ => effort_levels(model, choices, provider),
+        }
     }
 
     /// `accounts.updated`: the logins, which replace the ones from `hello`.
     pub fn set_accounts(&mut self, accounts: &Value) {
         self.accounts = accounts_from(accounts);
+    }
+
+    /// The logins given a year-long token since `before`: a first one, or a
+    /// new one in place of an older. The app throws confetti from their
+    /// Usage rows (confetti.rs). A login new to the list doesn't count, nor
+    /// one whose token went.
+    pub fn new_year_tokens(&self, before: &[Account]) -> Vec<String> {
+        self.accounts
+            .iter()
+            .filter(|a| a.year_token.is_some())
+            .filter(|a| before.iter().any(|b| b.id == a.id && b.year_token != a.year_token))
+            .map(|a| a.id.clone())
+            .collect()
+    }
+
+    /// The logins signed back in since `before`: signed out then, not now.
+    /// The app throws confetti for them too.
+    pub fn signed_back_in(&self, before: &[Account]) -> Vec<String> {
+        self.accounts.iter().filter(|a| !a.signed_out).filter(|a| before.iter().any(|b| b.id == a.id && b.signed_out)).map(|a| a.id.clone()).collect()
+    }
+
+    /// One login as the runner has it now (`accounts.useReset`'s answer),
+    /// in its place; a login not in the list is left out.
+    pub fn replace_account(&mut self, account: &Value) {
+        for a in accounts_from(&Value::Array(vec![account.clone()])) {
+            if let Some(slot) = self.accounts.iter_mut().find(|x| x.id == a.id) {
+                *slot = a;
+            }
+        }
     }
 
     /// `pools.updated`: the pools, which replace the ones from `hello`.
@@ -208,6 +323,7 @@ pub fn provider_title(id: &str) -> String {
     match id {
         "claude" | "" => "Claude".to_owned(),
         "codex" => "Codex".to_owned(),
+        "opencode" => "OpenCode".to_owned(),
         other => {
             let mut chars = other.chars();
             chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
@@ -468,7 +584,7 @@ impl<'a> ChipSettings<'a> {
     /// The modes the permission menu offers: Auto needs a provider with its
     /// own judge of each action, or a thread already on it.
     pub fn permission_modes(&self) -> Vec<&'static str> {
-        if has_auto_mode(&self.provider) || self.permission_mode == "auto" {
+        if self.logins.has_auto_mode(&self.provider) || self.permission_mode == "auto" {
             vec!["full", "auto", "ask", "plan"]
         } else {
             vec!["full", "ask", "plan"]
@@ -487,7 +603,7 @@ impl<'a> ChipSettings<'a> {
     }
 
     pub fn effort_levels(&self) -> Vec<String> {
-        effort_levels(self.effective_model().as_deref(), self.choices(), &self.provider)
+        self.logins.effort_levels(self.effective_model().as_deref(), self.choices(), &self.provider)
     }
 }
 
@@ -498,6 +614,7 @@ pub fn permission_title(mode: &str) -> &'static str {
         "ask" => "Ask before edits",
         "auto" => "Auto",
         "plan" => "Plan first",
+        "unknown" => "Access unknown",
         _ => "Unknown mode",
     }
 }
@@ -508,6 +625,7 @@ pub fn permission_help(mode: &str) -> &'static str {
         "ask" => "Asks before editing files or running commands",
         "auto" => "A safety check approves or blocks each action, and asks only when unsure",
         "plan" => "Reads and plans, and changes nothing until you approve its plan",
+        "unknown" => "Its runner doesn't say what access this thread has. Updating Threadbear there shows it",
         _ => "A mode from a newer runner that this app doesn't know. Update the app to see it. Anything made from this thread here asks before edits",
     }
 }
@@ -549,13 +667,37 @@ pub fn short_account_name(id: &str, accounts: &[Account]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_login_signed_back_in_is_one_that_was_signed_out() {
+        let list = |logins: &[(&str, bool)]| -> Vec<Account> { logins.iter().map(|(id, out)| Account { id: (*id).into(), signed_out: *out, ..Default::default() }).collect() };
+        let before = list(&[("a", true), ("b", false), ("c", true)]);
+        let logins = RunnerLogins { accounts: list(&[("a", false), ("b", false), ("c", true), ("d", false)]), ..Default::default() };
+        assert_eq!(logins.signed_back_in(&before), vec!["a".to_string()]);
+        assert!(logins.signed_back_in(&logins.accounts.clone()).is_empty());
+    }
+
+    #[test]
+    fn a_login_given_a_year_long_token_is_new_once() {
+        let list = |tokens: &[(&str, Option<&str>)]| -> Vec<Account> {
+            tokens.iter().map(|(id, made)| Account { id: (*id).into(), year_token: made.map(|m| YearToken { made_at: Some(m.into()) }), ..Default::default() }).collect()
+        };
+        let before = list(&[("a", None), ("b", Some("2026-01-01")), ("c", Some("2026-02-01"))]);
+        let mut logins = RunnerLogins { accounts: list(&[("a", Some("2026-11-18")), ("b", Some("2026-01-01")), ("c", Some("2026-11-18")), ("d", Some("2026-11-18"))]), ..Default::default() };
+        // a got its first, c a new one; b is as it was and d is new to the list.
+        assert_eq!(logins.new_year_tokens(&before), vec!["a".to_string(), "c".to_string()]);
+        let now = logins.accounts.clone();
+        assert!(logins.new_year_tokens(&now).is_empty());
+        logins.accounts = list(&[("a", None)]);
+        assert!(logins.new_year_tokens(&now).is_empty());
+    }
+
     use super::*;
     use serde_json::json;
 
     fn logins() -> RunnerLogins {
         RunnerLogins::from_hello(&json!({
             "accounts": [
-                { "id": "claude-main", "provider": "claude", "email": "mike@example.com", "defaultModel": "claude-fable-5-1", "models": [
+                { "id": "claude-main", "provider": "claude", "email": "alex@example.com", "defaultModel": "claude-fable-5-1", "models": [
                     { "id": "opus", "model": "claude-opus-5-5", "title": "Opus 5.5", "description": "For complex work" },
                     { "id": "claude-fable-5-1", "title": "Fable 5.1" },
                     { "id": "claude-sonnet-4-5", "title": "Sonnet 4.5" }
@@ -632,16 +774,16 @@ mod tests {
     #[test]
     fn account_names() {
         let l = logins();
-        assert_eq!(short_account_name("claude-main", &l.accounts), "mike");
+        assert_eq!(short_account_name("claude-main", &l.accounts), "alex");
         assert_eq!(short_account_name("codex-main", &l.accounts), "Codex");
-        assert_eq!(l.account("claude-main").unwrap().name(), "mike@example.com");
+        assert_eq!(l.account("claude-main").unwrap().name(), "alex@example.com");
         assert_eq!(l.account("codex-main").unwrap().name(), "sam@example.com");
     }
 
     #[test]
     fn two_logins_with_one_email_go_by_note_or_id() {
         let a = |id: &str, email: &str, note: Option<&str>| Account { id: id.into(), provider: "claude".into(), email: Some(email.into()), note: note.map(Into::into), ..Default::default() };
-        let accounts = vec![a("claude-main", "mike@example.com", None), a("claude-2", "Mike@Example.com", Some("Hooks")), a("claude-3", "sam@example.com", None)];
+        let accounts = vec![a("claude-main", "alex@example.com", None), a("claude-2", "Alex@Example.com", Some("Hooks")), a("claude-3", "sam@example.com", None)];
         assert_eq!(twin_label(&accounts[0], &accounts).as_deref(), Some("claude-main"));
         assert_eq!(twin_label(&accounts[1], &accounts).as_deref(), Some("Hooks"));
         assert_eq!(twin_label(&accounts[2], &accounts), None);

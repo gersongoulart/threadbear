@@ -38,12 +38,24 @@ function env(): Env {
   return { cwd, codexHome, media, blobs, ctx: fileContext(cwd, media, blobs) };
 }
 
+// The captures were made on a Mac, with the folders as /work/proj and
+// /codex-home. A string that is a path under one is that path in this
+// machine's own spelling (what Codex would send here: backslashes on Windows,
+// all the way along); in any other string the folder's name is swapped in.
+function localise(s: string, e: Env): string {
+  const roots: [string, string][] = [['/work/proj', e.cwd], ['/codex-home', e.codexHome]];
+  for (const [fake, real] of roots) {
+    if ((s === fake || s.startsWith(fake + '/')) && !/\s/.test(s)) return real + s.slice(fake.length).split('/').join(path.sep);
+  }
+  return roots.reduce((t, [fake, real]) => t.replaceAll(fake, real), s);
+}
+
 function load(name: string, e: Env): Rec[] {
   return fs
     .readFileSync(path.join(FIX, `${name}.ndjson`), 'utf8')
     .split('\n')
     .filter(Boolean)
-    .map((l) => JSON.parse(l.replaceAll('/work/proj', e.cwd).replaceAll('/codex-home', e.codexHome)) as Rec);
+    .map((l) => JSON.parse(l, (_key, v) => (typeof v === 'string' ? localise(v, e) : v)) as Rec);
 }
 
 type Replay = { outs: AdapterOutput[]; normalizers: Record<string, CodexNormalizer> };
@@ -179,7 +191,7 @@ test('multi-file-patch: three edit.diff paths on one item, then one replaced', (
   assert.deepEqual(call.input.paths, ['src/a.ts', 'src/new.ts', 'old.txt'].map((p) => path.join(e.cwd, p)));
   const diffs = evs.filter((x) => x.type === 'edit.diff');
   assert.ok(diffs.every((d) => d.itemId === call.itemId));
-  assert.deepEqual(diffs.slice(0, 3).map((d) => path.relative(e.cwd, d.path)), ['src/a.ts', 'src/new.ts', 'old.txt']);
+  assert.deepEqual(diffs.slice(0, 3).map((d) => path.relative(e.cwd, d.path).split(path.sep).join('/')), ['src/a.ts', 'src/new.ts', 'old.txt']);
   assert.deepEqual(diffs[0].hunks[0].lines, [' const a = 1;', '-const b = 2;', '+const b = 3;', ' const c = 4;']);
   assert.deepEqual(diffs[1].hunks[0].lines, ['+export const n = 1;', '+export const m = 2;']);
   assert.deepEqual(diffs[2].hunks, [{ oldStart: 1, oldLines: 1, newStart: 0, newLines: 0, lines: ['-gone'] }]);
@@ -364,6 +376,23 @@ test('rate-limits: the codex bucket, credits, plan and a blocked reading', () =>
   assert.equal(both.plan, 'Pro');
   assert.equal(limitsFromRateLimits({ rateLimits: { limitId: 'codex', primary: null, secondary: null, rateLimitReachedType: 'rate_limit_reached' } })!.blocked, true);
   assert.equal(limitsFromAccount({ account: { type: 'chatgpt', email: 'someone@example.com', planType: 'prolite' } })!.email, 'someone@example.com');
+  // The read's usage-limit resets: the count, and the soonest to expire of
+  // those still available.
+  const withResets = limitsFromRateLimits({
+    rateLimits: { limitId: 'codex', primary: { usedPercent: 100, windowDurationMins: 10080, resetsAt: 1795403254 }, secondary: null, rateLimitReachedType: 'rate_limit_reached' },
+    rateLimitResetCredits: {
+      availableCount: 2,
+      credits: [
+        { id: 'b', resetType: 'codexRateLimits', status: 'available', grantedAt: 1794522765, expiresAt: 1797114765, title: 'Full reset' },
+        { id: 'a', resetType: 'codexRateLimits', status: 'available', grantedAt: 1793572660, expiresAt: 1796164660, title: 'Full reset' },
+        { id: 'c', resetType: 'codexRateLimits', status: 'redeemed', grantedAt: 1793000000, expiresAt: 1795000000 },
+      ],
+    },
+  })!;
+  assert.deepEqual(withResets.resets, { available: 2, nextExpiresAt: new Date(1796164660 * 1000).toISOString() });
+  assert.deepEqual(limitsFromRateLimits({ rateLimits: { limitId: 'codex', primary: null, secondary: null }, rateLimitResetCredits: { availableCount: 0, credits: [] } })!.resets, { available: 0 });
+  assert.deepEqual(limitsFromRateLimits({ rateLimits: { limitId: 'codex', primary: null, secondary: null }, rateLimitResetCredits: { availableCount: 3, credits: null } })!.resets, { available: 3 }, 'only the count known');
+  assert.equal(limitsFromRateLimits({ rateLimits: { limitId: 'codex', primary: null, secondary: null } })!.resets, undefined, 'an older Codex says nothing');
 });
 
 test('reasoning: deltas build the summary with no leading blank line; an empty item gives nothing', () => {
@@ -614,7 +643,7 @@ test('lineTooLarge: an item whose completion line was skipped closes as "Too lar
 test('a 2.5 MB image completion line decodes and saves, and closeOpen ends what is left', () => {
   const e = env();
   const n = new CodexNormalizer(e.ctx);
-  // A real PNG with 1.9 MB of padding after its end, as big as Mike's real
+  // A real PNG with 1.9 MB of padding after its end, as big as Alex's real
   // generated images get on the wire.
   const big = Buffer.concat([makePng(800, 800, [1, 2, 3]), Buffer.alloc(1_900_000, 7)]);
   const line = JSON.stringify({ method: 'item/completed', params: { threadId: 'th', item: { type: 'imageGeneration', id: 'ig', status: 'completed', revisedPrompt: 'x', result: big.toString('base64'), failure: null } } });
@@ -688,11 +717,11 @@ test("a machine's generic user name is not a private one, and a person's still i
   assert.deepEqual(localNames('runner', 'runnervm1a2b3c'), ['runnervm1a2b3c']);
   assert.deepEqual(localNames('root', 'localhost'), []);
   assert.deepEqual(localNames('Runner', 'ci.local'), [], 'any case, and a host too short to mean anything');
-  assert.deepEqual(localNames('mike', 'Mikes-MacBook-Pro.local'), ['mike', 'Mikes-MacBook-Pro']);
+  assert.deepEqual(localNames('alex', 'Alexs-MacBook-Pro.local'), ['alex', 'Alexs-MacBook-Pro']);
   assert.deepEqual(localNames('', 'Bobs-Mac.lan'), ['Bobs-Mac'], 'no user name to check for');
   // And a fixture that talks about the runner is clean there, but not with a real name given
   assert.deepEqual(leaks('{"x":"the runner restarts"}', [], localNames('runner', 'runnervm1a2b3c')), []);
-  assert.ok(leaks('{"x":"the mike restarts"}', [], localNames('mike', 'ci')).length);
+  assert.ok(leaks('{"x":"the alex restarts"}', [], localNames('alex', 'ci')).length);
 });
 
 test('the committed Codex fixtures hold nothing private', () => {

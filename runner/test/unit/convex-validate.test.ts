@@ -49,9 +49,10 @@ test('a row a function writes has to fit its table; one a test seeds itself need
   // A test may seed a row from before a rule, missing what's required now.
   await b.ctx.db.insert('commands', { runnerId: 'r', kind: 'send', args: {}, state: 'pending' });
   const writes = (doc: Record<string, unknown>) => ({ args: {}, handler: async (ctx: { db: { insert: (t: string, d: unknown) => Promise<string> } }) => void (await ctx.db.insert('commands', doc)) });
-  await call(b.ctx, writes({ runnerId: 'r', kind: 'send', args: {}, state: 'pending', createdAt: 1 }), {});
-  await assert.rejects(call(b.ctx, writes({ runnerId: 'r', kind: 'send', args: {}, state: 'pending' }), {}), /a row in commands that convex\/schema\.ts doesn't allow, at createdAt: missing/);
-  await assert.rejects(call(b.ctx, writes({ runnerId: 'r', kind: 'teleport', args: {}, state: 'pending', createdAt: 1 }), {}), /at kind: wants/);
+  const machine = { commandState: { kind: 'pending' }, commandStateTimers: [] };
+  await call(b.ctx, writes({ runnerId: 'r', kind: 'send', args: {}, state: 'pending', createdAt: 1, ...machine }), {});
+  await assert.rejects(call(b.ctx, writes({ runnerId: 'r', kind: 'send', args: {}, state: 'pending', ...machine }), {}), /a row in commands that convex\/schema\.ts doesn't allow, at createdAt: missing/);
+  await assert.rejects(call(b.ctx, writes({ runnerId: 'r', kind: 'teleport', args: {}, state: 'pending', createdAt: 1, ...machine }), {}), /at kind: wants/);
   // A patch is checked as the row it leaves.
   const id = b.rows('commands').at(-1)!._id;
   const patches = (p: Record<string, unknown>) => ({ args: {}, handler: async (ctx: { db: { patch: (i: string, d: unknown) => Promise<void> } }) => ctx.db.patch(id, p) });
@@ -65,7 +66,7 @@ test("the backend's real functions are checked end to end: a card field the sche
   delete process.env.RUNNER_KEY_NEXT;
   const sync = load('sync');
   const b = memoryBackend();
-  const row = { ...THREAD_BASICS, threadId: 'T', runnerId: 'm5runner0001', title: 'T', view: 'inbox', needsYou: true };
+  const row = { ...THREAD_BASICS, threadId: 'T', runnerId: 'laptop000001', title: 'T', view: 'inbox', needsYou: true };
   await call(b.ctx, sync.upsertThreads, { key: 'owner-key', threads: [{ ...row, asks: [{ action: 'Ship it?', options: ['Yes', 'No'], optionNotes: ['I land it', 'Nothing'] }] }] });
   await assert.rejects(call(b.ctx, sync.upsertThreads, { key: 'owner-key', threads: [{ ...row, asks: [{ action: 'Ship it?', fieldTheSchemaLacks: 1 }] }] }), /threads\[0\]\.asks\[0\]\.fieldTheSchemaLacks: not in the validator/);
 });

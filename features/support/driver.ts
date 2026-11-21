@@ -18,12 +18,14 @@ export type Row = {
   /** A reply's ```slack, ```email and ```draft boxes as drawn: the label, each
    * line, each formatted piece ("bold: Hi", "link: docs <https://x.dev>") and
    * what Copy says ("Copy" or "Copied"). */
-  drafts?: { label: string; lines: string[]; styled: string[]; copy: string }[];
+  drafts?: { label: string; lines: string[]; styled: string[]; copy: string; edited?: boolean; editing?: boolean }[];
   /** A reply's closed ```bash blocks and their icons: "[put, copy] npm test", or "[copy] npm test". */
   shellBlocks?: string[];
   /** The chips a row draws among its words: "picture: Picture 1", "card:
    * Fix the button", "thread: Morning brief". */
   chips?: string[];
+  /** The web addresses my bubble draws as links (GPUI). */
+  links?: string[];
   /** A gap row's words as drawn, from the row's own top, while it's on screen. */
   label?: { top: number; height: number };
 };
@@ -46,10 +48,16 @@ export type Thread = {
   background?: string | null;
   waiting?: string | null;
   subagents?: { id: string; depth: number; status: string; title: string; detail: string; selected: boolean }[];
-  /** "On bruce" for another runner's thread ("On bruce, offline"). */
+  /** "On mac-mini" for another runner's thread ("On mac-mini, offline"). */
   runner?: string | null;
   /** The row is laid out within the part of the list that's showing (GPUI only; null when it isn't drawn). */
   inView?: boolean | null;
+  /** The threads it started, nested under it (nestedThreads, GPUI only): its
+   *  count's words, whether it's open, and its threads while open, each with
+   *  its second line and whether that's a question waiting on Mike. */
+  /** On `selection`: the line above the transcript naming the thread that started it (nestedThreads, GPUI only). */
+  startedBy?: { text: string; threadId?: string | null } | null;
+  group?: { words: string; open: boolean; needsYou: number; working: number; finished: number; dot: boolean; threads: (Thread & { line?: string; question?: boolean })[] } | null;
 };
 
 export type Dump = {
@@ -87,7 +95,7 @@ export type Dump = {
    *  lines read ("Inbox | ⌘1"), and the pick's title. */
   anything?: { query: string; groups: { title: string; items: string[] }[]; picked?: string | null; recent: string[] } | null;
   /** The Move sheet while it's up. */
-  moveSheet?: { title: string; subtitle: string; folder: string; login: string; problems: string[]; leftBehind: string[]; clone?: string | null; asking: boolean; canMove: boolean } | null;
+  moveSheet?: { title: string; subtitle: string; folder: string; login: string; problems: string[]; leftBehind: string[]; clone?: string | null; cloneFrom?: string | null; asking: boolean; canMove: boolean } | null;
   decisions?: string[] | null;
   transcript: {
     threadId?: string;
@@ -133,7 +141,18 @@ export type Dump = {
   opening?: { thread: string; how: string; boxDrop: number | null } | null;
   /** The small motions as last seen (GPUI only): the row a click last slid
    * off, and the card that last arrived while its thread was on screen. */
-  juice?: { slidOff: string | null; cardArrived: number | null } | null;
+  /** `confetti`: the last burst asked for, from which anchor, and whether it's popped (its anchor was drawn). */
+  juice?: {
+    slidOff: string | null;
+    cardArrived: number | null;
+    confetti?: { anchor: string; popped: boolean } | null;
+    /** The answer whose button last filled, as "ask:option" from 0. */
+    answerFilled?: string | null;
+    /** How many pictures have dropped into the box. */
+    picturesDropped?: number | null;
+    /** How long a streaming reply's new words take to fade in; 0 under Reduce Motion. */
+    replyFadeMs?: number;
+  } | null;
   /** The last time the panels moved with their glide: where each panel was
    * drawn and where it is (or, in the GPUI app, is going), by panel
    * ("thread", "terminal"), and whether it's still moving (GPUI only). */
@@ -171,7 +190,8 @@ export type Rect = { x: number; y: number; width: number; height: number };
 export type Flight = { to: 'archive' | 'hibernate'; thread?: string | null; start: Rect; end?: { x: number; y: number } | null; onHeading: boolean; landed: boolean; landedBox?: Rect | null };
 
 /** `dot` is the accent dot (something only you can do), `quietDot` the grey one. */
-export type RailButton = { title: string; badge?: number | null; dot?: boolean; quietDot?: boolean; active: boolean };
+/** `nextVersion` (Updates only): what its icon shows of the next version, a turning ring while it's on its way and green once it's ready. */
+export type RailButton = { title: string; badge?: number | null; dot?: boolean; quietDot?: boolean; nextVersion?: 'none' | 'coming' | 'ready'; active: boolean };
 
 /** One of the activity bar's panels: whether it's on show, and what it says. */
 export type PanelLines = { shown: boolean; lines: string[] };

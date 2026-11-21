@@ -3,7 +3,7 @@
 // order RowContent lists them. The work lines are in work.rs, diffs in diff.rs,
 // cards in cards.rs and pictures in images.rs.
 mod cards;
-mod diff;
+pub(crate) mod diff;
 mod export;
 mod images;
 mod lab_review;
@@ -17,9 +17,10 @@ mod work;
 use self::metrics::*;
 use crate::style::{self, size, MAX_CONTENT_WIDTH, SIDE_INSET};
 use crate::thread::ThreadPane;
+use crate::tips::Tip as _;
 use gpui_kit::base::{SelectableText, TextView};
 use gpui_kit::component::menu::ContextMenuExt as _;
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Sizable as _};
+use gpui_kit::component::{h_flex, v_flex, Sizable as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 // The zoom-aware px (style.rs), in place of GPUI's.
@@ -43,7 +44,7 @@ pub(crate) struct RowsState {
     pub(crate) documents: HashMap<String, Entity<gpui_kit::base::TextViewState>>,
     pub(crate) document_order: Vec<String>,
     /// Keyed by appearance and zoom: its sizes are zoomed when it's built.
-    pub(crate) reading_style: Option<((bool, u32), gpui_kit::base::TextViewStyle)>,
+    pub(crate) reading_style: Option<(crate::style::ReadingStyleKey, gpui_kit::base::TextViewStyle)>,
     /// Question cards' "Something else" fields, and their typed text.
     pub(crate) others: HashMap<String, Entity<gpui_kit::component::input::InputState>>,
     /// Secret cards' masked fields. Never kept past the card's own answer.
@@ -214,7 +215,7 @@ impl ThreadPane {
             RowContent::Background(status) => self.background_row(status, cx),
             RowContent::Gap(gap) => self.gap_row(&row, gap, cx),
             RowContent::Changes(changes) => self.changes_card(ix, &row, changes, cx),
-            RowContent::LabReview(review) => self.lab_review_row(&row, review, cx),
+            RowContent::LabReview(review) => self.lab_review_row(ix, &row, review, cx),
         };
         // A step a work link went to: an accent rail and tint for a moment
         // (`TranscriptController.light`). The right-click menu goes over
@@ -238,10 +239,10 @@ impl ThreadPane {
             .on_mouse_down(MouseButton::Left, crate::selection_bar::pressed(self.summary.id.clone(), &row))
             .children(glow)
             .child(body)
-            .context_menu(move |menu, _, cx| {
+            .context_menu(move |menu, window, cx| {
                 // An open tool or thinking row says Collapse, as a group does.
                 let open = weak.upgrade().is_some_and(|pane| pane.read(cx).row_open(&menu_row));
-                Self::row_context_menu(menu_row.clone(), menu, weak.clone(), open, cx)
+                Self::row_context_menu(menu_row.clone(), menu, weak.clone(), open, window, cx)
             })
             .into_any_element()
     }
@@ -261,7 +262,7 @@ impl ThreadPane {
         let faint = style::faint_text(cx);
         let pending = message.pending;
         let faded = pending.is_some();
-        let mut col = v_flex().items_end().pt(px(USER_TOP)).pb(px(USER_BOTTOM));
+        let mut col = v_flex().items_end().pt(px(user_top())).pb(px(user_bottom()));
         if !message.images.is_empty() {
             col = col.child(self.user_images(&message.images, ix, message.text.is_empty() && message.origin.as_deref() == Some("phone"), cx));
         }
@@ -271,8 +272,8 @@ impl ThreadPane {
             match pending {
                 // A spinner while it's on its way, a clock when queued behind
                 // the running turn; the note below says the rest.
-                Some(Pending::Sending) => line = line.child(mark_box().child(self.spinner(14., cx))),
-                Some(Pending::Queued) => line = line.child(mark_box().child(work::icon("clock", 14., quiet))),
+                Some(Pending::Sending) => line = line.child(mark_box().id(("sending", ix)).tip("Sending to the runner").child(self.spinner(14., cx))),
+                Some(Pending::Queued) => line = line.child(mark_box().id(("queued", ix)).tip("Waiting for the current turn to finish").child(work::icon("clock", 14., quiet))),
                 _ => {}
             }
             let text = if message.text.is_empty() { " ".to_string() } else { message.text.clone() };
@@ -289,8 +290,9 @@ impl ThreadPane {
             let max_text = gpui_kit::px((column * BUBBLE_SHARE).floor()) - px(BUBBLE_PAD_H * 2.);
             // Pictures, cards and threads among the words are chips, the
             // lines laid out round them (chips.rs); the rest is one text.
-            let chips = if answered { None } else { self.chip_lines(ix, message, max_text, window, cx) };
+            let chips = if answered { None } else { self.chip_lines(ix, &row.id, message, max_text, window, cx) };
             let fit = (!answered && chips.is_none()).then(|| widest_line(&text, max_text, window));
+            let words = fit.is_some().then(|| self.bubble_words(("user-text", ix), text, &row.id, cx));
             let bubble = div()
                 .max_w(relative(BUBBLE_SHARE))
                 .when_some(fit, |d, (ink, _)| d.w(ink + px(BUBBLE_PAD_H * 2.)))
@@ -305,12 +307,12 @@ impl ThreadPane {
                 .when(faded, |d| d.opacity(0.5))
                 // A point over, as the layout rounds widths and a line that
                 // fits exactly would wrap.
-                .when_some(fit, |d, (ink, span)| d.child(div().w(span + px(1.)).mr(ink - span - px(1.)).child(SelectableText::new(("user-text", ix), text))))
+                .when_some(fit.zip(words), |d, ((ink, span), words)| d.child(div().w(span + px(1.)).mr(ink - span - px(1.)).child(words)))
                 .when_some(chips.map(|c| c.1), |d, lines| d.child(lines))
                 .when_some(answered_words, |d, words| d.child(answers_body(ix, &words, cx)));
             // The pencil, left of the bubble and level with its last line, on
             // hover, as Codex and ChatGPT put theirs (`Cells.updateEdit`).
-            let editable = message.editable && pending.is_none() && threadbear_core::composer::can_rewind(&self.summary.provider) && self.subagent_id.is_none();
+            let editable = message.editable && pending.is_none() && self.can_rewind(cx) && self.subagent_id.is_none();
             if editable {
                 let (row_id, group) = (row.id.clone(), SharedString::from(format!("user-row-{ix}")));
                 let hover = style::primary_opacity(cx, 0.08);
@@ -352,6 +354,24 @@ impl ThreadPane {
         row_wrap(row, col)
     }
 
+    /// Mike's words as selectable text, any web address in them a link in
+    /// the reply's link colour that a click follows as a reply's link does
+    /// (`follow_link`: the open gate, the browser Default, ⌘ for the
+    /// browser). Its colour alone marks it, so the bubble's width is
+    /// measured the same.
+    pub(crate) fn bubble_words(&self, id: impl Into<ElementId>, text: String, row_id: &str, cx: &mut Context<Self>) -> SelectableText {
+        let links = threadbear_core::chips::web_links(&text);
+        let words = SelectableText::new(id, text);
+        if links.is_empty() {
+            return words;
+        }
+        let (weak, row_id) = (cx.weak_entity(), row_id.to_owned());
+        words.links(links, style::link_text(cx), move |url, event, window, cx| {
+            let command = event.modifiers.secondary(cx);
+            let _ = weak.update(cx, |this, cx| this.follow_link(&url, &row_id, command, window, cx));
+        })
+    }
+
     /// A message just sent lifting off the composer into the thread: Return
     /// is the most-used thing in the app, so it's well under 200 ms and holds
     /// nothing up (`SendLift`; the mockup Mike picked, 13 Nov). Only one on
@@ -383,7 +403,7 @@ impl ThreadPane {
                 None => ("Sent by a schedule".to_owned(), message.text.clone()),
             }
         } else {
-            ("Sent by the runner after it restarted".to_owned(), message.text.clone())
+            (message.runner_header(), message.text.clone())
         };
         if message.is_from_schedule() {
             // Clock glyph in the text's place (`symbol("clock", ...)`).
@@ -410,6 +430,7 @@ impl ThreadPane {
         // this Mac, and only picture files are drawn (`markdown::pictures`).
         let body = markdown::pictures(header.body.trim(), self.summary.runner_id.is_none()).into_owned();
         let body = self.with_thread_chips(body, cx);
+        let body = self.with_link_marks(body, cx);
         let doc = (!body.is_empty()).then(|| self.markdown_state(&format!("agent-{ix}"), &body, cx));
         let text_style = self.reading_style(cx);
         // Its links' own menus and cards, as a reply's (reply_links.rs).
@@ -427,7 +448,7 @@ impl ThreadPane {
             // is on the Mac: TextKit leaves a last paragraph's off.
             .child(div().when(text.is_some(), |d| d.mb(px(8.))).child(title))
             .when_some(text, |d, text| d.child(div().text_size(px(size::BODY)).line_height(px(size::BODY_LINE)).child(text)));
-        h_flex().w_full().px(px(SIDE_INSET)).justify_center().child(div().w_full().max_w(px(MAX_CONTENT_WIDTH)).pt(px(USER_TOP)).pb(px(USER_BOTTOM)).child(card)).into_any_element()
+        h_flex().w_full().px(px(SIDE_INSET)).justify_center().child(div().w_full().max_w(px(MAX_CONTENT_WIDTH)).pt(px(user_top())).pb(px(user_bottom())).child(card)).into_any_element()
     }
 
     /// A row's markdown, its links going to `link_clicked` (and from there
@@ -435,7 +456,7 @@ impl ThreadPane {
     /// text view would send them.
     pub(crate) fn linked_text(&self, doc: &Entity<gpui_kit::base::TextViewState>, row_id: &str, cx: &mut Context<Self>) -> TextView {
         let weak = cx.weak_entity();
-        let drafts = crate::draft_boxes::DraftBoxes { origin: self.origin(), cwd: self.summary.cwd.clone(), row: row_id.to_owned() };
+        let drafts = crate::draft_boxes::DraftBoxes { origin: self.origin(), thread: self.summary.id.clone(), cwd: self.summary.cwd.clone(), row: row_id.to_owned() };
         let chips = crate::chips::ThreadChipPills { row: row_id.to_owned() };
         let row_id = row_id.to_owned();
         let local = self.summary.runner_id.is_none();
@@ -462,17 +483,31 @@ impl ThreadPane {
             .plugin(drafts)
             // A thread's id as its chip (`with_thread_chips`).
             .plugin(chips)
+            // The live mark before a link to another thread (`with_link_marks`).
+            .plugin(crate::thread_link_marks::Marks)
+            // A PR's state before a link to it (pr_view.rs).
+            .plugin(crate::pr_view::PrMarks)
             // A closed ```mermaid or ```html fence as what it shows (rich_boxes.rs).
             .plugin(crate::rich_boxes::RichBoxes)
+            // A live page's card (live_pages.rs).
+            .plugin(crate::live_pages::Cards)
     }
 
     /// The reading column's text: markdown, selectable, links going where they
     /// go. `row.rs`'s `TextItem::text` is the whole reply so far; `prepare`
     /// escapes work links and `set_text` appends what's new.
     fn assistant_row(&mut self, ix: usize, row: &Row, item: &TextItem, cx: &mut Context<Self>) -> AnyElement {
-        let source = markdown::prepare(&markdown::pictures(&item.text, self.summary.runner_id.is_none()), &self.summary.id);
-        // Thread ids as chips (chips.rs).
+        let local = self.summary.runner_id.is_none();
+        // A link to a file that isn't here as its words (`dead_file_links`).
+        // After `prepare`, which links paths in backticks: a dead one of those
+        // goes back to plain code too.
+        // A page shown in the reply as a live page's card (live_pages.rs), first.
+        let text = if local && crate::live_pages::on(cx) { markdown::live_pages(&item.text) } else { std::borrow::Cow::Borrowed(item.text.as_str()) };
+        let source = markdown::dead_file_links(&markdown::prepare(&markdown::pictures(&text, local), &self.summary.id), local).into_owned();
+        // Thread ids as chips (chips.rs), and a live mark before each link
+        // to another thread (thread_link_marks.rs).
         let source = self.with_thread_chips(source, cx);
+        let source = self.with_link_marks(source, cx);
         let doc = self.markdown_state(&item.item_id, &source, cx);
         let text_style = self.reading_style(cx);
         let text = self.linked_text(&doc, &row.id, cx).selectable(true).style(text_style).shared_code_block_highlighter(plain_code_blocks());
@@ -574,14 +609,14 @@ impl ThreadPane {
         h_flex().w_full().px(px(SIDE_INSET)).justify_center().child(div().w_full().max_w(px(MAX_CONTENT_WIDTH)).child(box_)).into_any_element()
     }
 
-    pub(crate) fn spinner(&self, side: f32, cx: &App) -> impl IntoElement {
+    pub(crate) fn spinner(&self, side: f32, cx: &App) -> crate::spinner::Spinner {
         let color = style::quiet_text(cx);
-        gpui_kit::component::spinner::Spinner::new().with_size(gpui_kit::component::Size::Size(px(side))).color(color)
+        crate::spinner::Spinner::new().with_size(px(side)).color(color)
     }
 
     /// The reading column's text style, one per appearance (see `reading_style`).
     pub(crate) fn reading_style(&mut self, cx: &mut Context<Self>) -> gpui_kit::base::TextViewStyle {
-        let key = (cx.theme().is_dark(), style::zoom_percent());
+        let key = crate::style::reading_style_key(cx);
         match &self.rows.reading_style {
             Some((k, style)) if *k == key => style.clone(),
             _ => {
@@ -611,9 +646,10 @@ impl ThreadPane {
                     .h(px(metrics::PAGED_HEADING))
                     .justify_between()
                     .child(h_flex().items_center().gap(px(2.5)).child(crate::icons::tall_checkmark().with_size(px(16.)).text_color(style::tick_green(cx))).child(title("Done")))
-                    .child(card_button(("past-done-archive", ix), "Archive", ButtonLook::Plain, "Archive this thread", cx).on_click(move |_, window, cx| {
+                    .child(card_button(("past-done-archive", ix), "Archive", ButtonLook::Plain, "Archive this thread", cx).on_click(move |ev, window, cx| {
                         if let Some(app) = app.upgrade() {
-                            app.update(cx, |app, cx| app.toggle_archive(window, cx));
+                            let at = ev.position();
+                            app.update(cx, |app, cx| app.archive_from_card(at, window, cx));
                         }
                     })),
             );
@@ -692,27 +728,34 @@ pub(crate) fn row_wrap(row: &Row, inner: impl IntoElement) -> AnyElement {
 /// shown as it is. His words used to be dropped (thread 3fdaaeec, 12 Nov).
 pub(crate) struct AnsweredWords {
     pub lines: Vec<(String, String)>,
+    pub review: bool,
     pub extra: String,
 }
 
 pub(crate) fn answered_words(message: &UserMessage) -> Option<AnsweredWords> {
     if let Some(review) = &message.review {
-        return Some(AnsweredWords { lines: review.lines.iter().map(|l| (l.label.clone(), l.text.clone())).collect(), extra: String::new() });
+        return Some(AnsweredWords { lines: review.lines.iter().map(|l| (l.label.clone(), l.text.clone())).collect(), extra: String::new(), review: true });
     }
     let extra = threadbear_core::composer::answers_extra(&message.text, &message.answers)?;
-    Some(AnsweredWords { lines: message.answers.iter().map(|a| (a.action.clone(), a.answer.clone())).collect(), extra })
+    Some(AnsweredWords { lines: message.answers.iter().map(|a| (a.action.clone(), a.answer.clone())).collect(), extra, review: false })
 }
 
 /// The body of a message that answered asks or a review (`userWords`): each
 /// question small and quiet, its answer as his own words, then the rest.
 fn answers_body(ix: usize, words: &AnsweredWords, cx: &App) -> Div {
     let question = style::secondary_label(cx);
-    let AnsweredWords { lines, extra } = words;
+    let AnsweredWords { lines, extra, review } = words;
     let mut body = v_flex().gap(px(8.));
     for (i, (label, text)) in lines.iter().enumerate() {
+        let heading = h_flex().items_center().gap(px(4.)).text_size(px(size::SMALL)).line_height(px(18.)).text_color(question)
+            .when(*review && i == 0, |d| d.child(div().id(("review-answer", ix)).tip("Review").child(work::icon("rectangle.on.rectangle", size::SMALL, question))))
+            // A long question wraps inside the bubble: as a bare row child its
+            // text kept its one-line width and ran out past the bubble's edge
+            // (Mike, 15 Nov), while the short answer under it set nothing.
+            .child(div().flex_1().min_w_0().child(label.clone()));
         body = body.child(
             v_flex()
-                .when(!label.is_empty(), |d| d.child(div().text_size(px(size::SMALL)).line_height(px(18.)).text_color(question).child(label.clone())))
+                .when(!label.is_empty() || (*review && i == 0), |d| d.child(heading))
                 .child(SelectableText::new(("answer-text", ix * 1000 + i), text.clone())),
         );
     }

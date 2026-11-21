@@ -21,7 +21,7 @@ import type { AdapterOutput, SessionSink, ToolApprovalRequest } from '../../src/
 import { ProcessRegistry } from '../../src/proc.ts';
 import { nullLogger } from '../../src/log.ts';
 import { CLAUDE_PATCH_ID } from '../../src/claude-trust.ts';
-import { MAYBE_RUNS_AS_CODE, RUNS_AS_CODE, runsAsCodeByName, type CodeWrite } from '../../src/code-writes.ts';
+import { canonicalPath, MAYBE_RUNS_AS_CODE, RUNS_AS_CODE, runsAsCodeByName, windowsFileName, type CodeWrite } from '../../src/code-writes.ts';
 import { remoteCardShowsAll } from '../../src/tools.ts';
 import type { PermissionMode } from '../../src/protocol.ts';
 
@@ -85,7 +85,7 @@ for (const mode of ['auto', 'ask'] as const) {
     s.result('completed');
     const t = await settle(h, thread.id);
     assert.equal(fs.existsSync(mark), false, 'none of its code ran');
-    assert.equal(t.patches?.find((p) => p.id === 'notes')?.untrusted, 'new', 'it waits for Mike in Patches');
+    assert.equal(t.patches?.find((p) => p.id === 'notes')?.untrusted, 'new', 'it waits for Alex in Patches');
     assert.equal(t.actions, undefined);
     const saved = path.join(home, 'patch-trust.json');
     const stored = fs.existsSync(saved) ? JSON.parse(fs.readFileSync(saved, 'utf8')).folders : {};
@@ -103,7 +103,7 @@ test('F1: the mode is the one recorded with the call: a write let through in Ask
   await tick();
   const s = h.adapter.last;
   s.init();
-  // Mike switches to Full access while the write is going through.
+  // Alex switches to Full access while the write is going through.
   h.runner.update({ threadId: thread.id, permissionMode: 'full' });
   assert.equal(h.runner.get(thread.id).permissionMode, 'full');
   const askMark = path.join(marks, 'ask.ran');
@@ -258,7 +258,7 @@ function session(mode: PermissionMode, runsAsCode?: (file: string) => CodeWrite)
     output: (o) => outputs.push(o),
     requestApproval: async (req) => {
       approvals.push(req);
-      // Mike (or an older client) picks Always allow where it can.
+      // Alex (or an older client) picks Always allow where it can.
       return { decision: 'allowAlways' };
     },
     requestQuestion: async () => ({ answers: null }),
@@ -370,10 +370,75 @@ for (const mode of ['ask', 'auto'] as const) {
   });
 }
 
-test("Full access: an agent's patch write doesn't ask (Mike's own workflow)", async () => {
+test("Full access: an agent's patch write doesn't ask (Alex's own workflow)", async () => {
   const a = session('full');
   assert.deepEqual(await a.hook('c1', path.join(a.dir, '.threadbear', 'patches', 'notes.ts'), 'bypassPermissions'), {});
   a.state.close!();
+});
+
+// The Windows port's review: NTFS reads more than one spelling as the same
+// new file, so a write to `evil.ts::$DATA` made the real evil.ts while the
+// name check saw something else.
+test('windowsFileName: the stream, trailing dots and spaces NTFS drops from a name, whatever platform asks', () => {
+  const same = (given: string, want: string) => assert.equal(windowsFileName(given), want, given);
+  same('C:\\p\\.threadbear\\patches\\evil.ts::$DATA', 'C:\\p\\.threadbear\\patches\\evil.ts');
+  same('C:\\p\\.threadbear\\patches\\evil.ts::$data', 'C:\\p\\.threadbear\\patches\\evil.ts');
+  same('C:\\p\\.threadbear\\patches\\evil.ts:stream', 'C:\\p\\.threadbear\\patches\\evil.ts');
+  same('C:\\p\\.threadbear\\patches\\evil.ts:stream:$DATA', 'C:\\p\\.threadbear\\patches\\evil.ts');
+  same('C:\\p\\.claude\\settings.json::$DATA', 'C:\\p\\.claude\\settings.json');
+  same('C:\\p\\.mcp.json::$DATA', 'C:\\p\\.mcp.json');
+  same('C:\\p\\.threadbear\\patches\\evil.ts.', 'C:\\p\\.threadbear\\patches\\evil.ts');
+  same('C:\\p\\.threadbear\\patches\\evil.ts ', 'C:\\p\\.threadbear\\patches\\evil.ts');
+  same('C:\\p\\.threadbear\\patches\\evil.ts. . ', 'C:\\p\\.threadbear\\patches\\evil.ts');
+  same('C:\\p\\.threadbear\\patches\\evil.ts.::$DATA', 'C:\\p\\.threadbear\\patches\\evil.ts');
+  same('C:\\p\\.threadbear::$INDEX_ALLOCATION\\patches\\evil.ts', 'C:\\p\\.threadbear\\patches\\evil.ts');
+  same('C:\\p\\.threadbear.\\patches \\evil.ts', 'C:\\p\\.threadbear\\patches\\evil.ts');
+  same('C:/p/.threadbear/patches/evil.ts::$DATA', 'C:\\p\\.threadbear\\patches\\evil.ts');
+  // The drive stays, also after \\?\, and . and .. are left for the path to settle.
+  same('\\\\?\\C:\\p\\.mcp.json::$DATA', '\\\\?\\C:\\p\\.mcp.json');
+  same('C:\\p\\.\\q\\..\\.mcp.json', 'C:\\p\\.\\q\\..\\.mcp.json');
+  same('C:\\p\\.mcp.json', 'C:\\p\\.mcp.json');
+  same('C:\\p\\', 'C:\\p\\');
+  same('evil.ts::$DATA', 'evil.ts');
+});
+
+test('a write to a new file spelt as an NTFS stream or with a trailing dot is still code by its name (Windows)', { skip: process.platform === 'win32' ? false : 'NTFS names are Windows only' }, () => {
+  const home = tmpDir();
+  const project = tmpDir();
+  for (const dir of [path.join(project, '.threadbear', 'patches'), path.join(project, '.claude'), path.join(home, '.threadbear')]) fs.mkdirSync(dir, { recursive: true });
+  const spellings = (file: string) => [`${file}::$DATA`, `${file}::$data`, `${file}.`, `${file} `, `${file}. `, `${file}.::$DATA`];
+  for (const file of [path.join(project, '.threadbear', 'patches', 'evil.ts'), path.join(project, '.threadbear', 'patches', 'evil.mjs'), path.join(project, '.claude', 'settings.json'), path.join(project, '.claude', 'settings.local.json'), path.join(project, '.mcp.json'), path.join(home, '.threadbear', 'x.json')]) {
+    assert.ok(runsAsCodeByName(file, home), `${file}, plainly`);
+    for (const spelt of spellings(file)) assert.ok(runsAsCodeByName(spelt, home), spelt);
+  }
+  // A directory spelt the same way, and a name that only looks like one.
+  assert.ok(runsAsCodeByName(path.join(project, '.threadbear::$INDEX_ALLOCATION', 'patches', 'evil.ts'), home));
+  assert.ok(runsAsCodeByName(path.join(project, '.threadbear', 'patches. ', 'evil.ts'), home));
+  assert.ok(!runsAsCodeByName(`${path.join(project, 'src', 'index.ts')}::$DATA`, home));
+  assert.ok(!runsAsCodeByName(`${path.join(project, '.threadbear', 'patches', 'notes.md')}::$DATA`, home));
+  assert.ok(!runsAsCodeByName(`${path.join(project, '.threadbear', 'patches', 'evil.ts.bak')}. `, home));
+  // The real thing: writing through the stream spelling makes the real patch, and the name check agrees it's one.
+  const spelt = `${path.join(project, '.threadbear', 'patches', 'made.ts')}::$DATA`;
+  fs.writeFileSync(spelt, 'export default {};\n');
+  assert.ok(fs.existsSync(path.join(project, '.threadbear', 'patches', 'made.ts')), 'the stream spelling made made.ts');
+  assert.ok(runsAsCodeByName(spelt, home));
+});
+
+test("a script a hashed patch names that isn't there yet is covered when it's written by its stream spelling too (Windows)", { skip: process.platform === 'win32' ? false : 'NTFS names are Windows only' }, async () => {
+  const folder = path.join(tmpDir(), 'app');
+  fs.mkdirSync(path.join(folder, '.git'), { recursive: true });
+  put(path.join(folder, '.threadbear', 'patches', 'p.ts'), "export default { actions: [{ title: 'Go', run: './scripts/new.sh' }] };\n");
+  const patch = path.join(folder, '.threadbear', 'patches', 'p.ts');
+  const trust = new PatchTrust();
+  trust.trustCurrent([patch]);
+  await trust.check(patch, 0);
+  const made = path.join(folder, 'scripts', 'new.sh');
+  assert.equal(trust.covers(canonicalPath(made)), true, 'by its name');
+  for (const spelt of [`${made}::$DATA`, `${made}.`, `${made} `]) {
+    assert.equal(canonicalPath(spelt), canonicalPath(made), spelt);
+    assert.equal(trust.covers(canonicalPath(spelt)), true, spelt);
+  }
+  assert.equal(trust.covers(canonicalPath(`${path.join(folder, 'scripts', 'other.sh')}::$DATA`)), false);
 });
 
 test('what counts as code by name, and what the runner adds: files a hashed patch covers, scripts Claude settings name', async () => {
@@ -609,7 +674,7 @@ test('F21 case 2: in a cloned repo, a small Edit to its patch trusts none of it;
   assert.deepEqual(trust.trustAgentWrite(fresh, shaOf(mine), null, folder), [fresh]);
 });
 
-test('F21 through the real normalizer: a Full access Edit of an untrusted patch leaves it waiting; of one Mike trusted, it carries on', async () => {
+test('F21 through the real normalizer: a Full access Edit of an untrusted patch leaves it waiting; of one Alex trusted, it carries on', async () => {
   const root = tmpDir();
   const marks = tmpDir();
   const project = path.join(root, 'cloned');
@@ -640,7 +705,7 @@ test('F21 through the real normalizer: a Full access Edit of an untrusted patch 
   let t = await settle(h, thread.id);
   assert.equal(t.patches?.[0].untrusted, 'new');
   assert.equal(fs.existsSync(mark), false);
-  // Mike reads it and trusts it; the agent's next Edit carries on.
+  // Alex reads it and trusts it; the agent's next Edit carries on.
   await h.runner.trustPatches(thread.id, [{ file, hash: t.patches![0].hash! }]);
   assert.equal(fs.existsSync(mark), true);
   edit('e2', '"Ship"', '"Ship it"');
@@ -661,7 +726,7 @@ test("F21 for Claude settings: an Edit of settings with untrusted hooks doesn't 
   put(settings, edited);
   assert.equal(trust.trustClaudeEdit(dir, settings, shaOf(edited), shaOf(theirs)), false);
   assert.ok(!trust.checkClaude(dir).trusted);
-  // Trusted by Mike, then a pull changes the script, then a small Edit.
+  // Trusted by Alex, then a pull changes the script, then a small Edit.
   const v = trust.checkClaude(dir);
   assert.ok(!v.trusted);
   trust.trustClaude(dir, v.hash);
@@ -830,7 +895,7 @@ test("strings a patch can't run, and a worktree's own setup and check, don't mak
   put(path.join(project, '.threadbear', 'patches', 'p.ts'), `export default {
   worktree: { setup: './setup.sh', check: './check.sh --quick', keep: ['app/.build'] },
   actions: [
-    { title: "Mike's chip", prompt: "Don't stop at what's there; it's only a thought (really)." },
+    { title: "Alex's chip", prompt: "Don't stop at what's there; it's only a thought (really)." },
     { title: 'Site', url: 'https://example.com/a?b=1' },
   ],
   hooks: [{ title: 'Types', on: 'turn.end', run: 'true', edited: 'src/**/*.ts' }],
@@ -943,4 +1008,9 @@ test("worktree setup doesn't run the main checkout's uncommitted package.json", 
   execFileSync('bash', [path.join(wt, 'worktree-setup.sh')], { cwd: wt, env: { ...process.env, THREADBEAR_NODE: path.join(bin, 'node') }, stdio: 'pipe' });
   const broken = fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '';
   assert.ok(!broken.includes(`${main} install`), broken);
+});
+
+test("a write to a named stream asks on Windows, whatever the file's called (Codex's review, 18 Nov 2026)", { skip: process.platform !== 'win32' && 'Windows streams' }, () => {
+  assert.equal(runsAsCodeByName('C:\\work\\proj\\container.dat:task.js'), true);
+  assert.equal(runsAsCodeByName('C:\\work\\proj\\notes.txt'), false);
 });

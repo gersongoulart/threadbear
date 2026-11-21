@@ -153,6 +153,10 @@ pub fn mid_message(commands: &[SlashCommand]) -> Vec<SlashCommand> {
 
 /// Where a command came from, for the detail pane.
 pub fn origin(command: &SlashCommand, provider: &str) -> String {
+    origin_named(command, &cli_name(provider))
+}
+
+pub fn origin_named(command: &SlashCommand, name: &str) -> String {
     if command.is_threadbear() {
         return "Threadbear's own: it changes this thread's settings".to_owned();
     }
@@ -181,12 +185,12 @@ pub fn origin(command: &SlashCommand, provider: &str) -> String {
         },
         Some("claude.ai") => "Synced from claude.ai".to_owned(),
         Some("admin") => "Set up by your organisation".to_owned(),
-        Some("system") => format!("{}'s own", cli_name(provider)),
+        Some("system") => format!("{}'s own", name),
         _ => {
             if command.is_skill() {
                 "A skill".to_owned()
             } else {
-                format!("{}'s own", cli_name(provider))
+                format!("{}'s own", name)
             }
         }
     }
@@ -229,11 +233,7 @@ pub fn plain_description(text: &str) -> String {
 
 /// A path to show: the home folder as ~.
 pub fn short_path(path: &str, home: &str) -> String {
-    if !home.is_empty() && (path == home || path.starts_with(&format!("{home}/"))) {
-        format!("~{}", &path[home.len()..])
-    } else {
-        path.to_owned()
-    }
+    crate::new_thread::abbreviate_home(path, home)
 }
 
 pub fn in_category(command: &SlashCommand, category: Category, recent: &[String]) -> bool {
@@ -351,9 +351,21 @@ impl PaletteLayout {
     }
 
     /// A dragged width: never under 480 (three columns and their words),
-    /// never wider than the window less a margin each side.
+    /// never wider than the window less a margin each side. In a window
+    /// too narrow for 480 and those margins, 8 in from each side, as
+    /// auto_width has it, rather than 480 and off the window.
     pub fn width_in(w: f64, window: f64) -> f64 {
-        w.max(480.).min((window - 80.).max(480.))
+        let most = (window - 80.).max(480.).min(window - 16.);
+        w.max(480.).min(most)
+    }
+
+    /// The width with none dragged: the box's, but never under the 480 a
+    /// dragged one keeps, so a narrow box (a narrow window, or panels open
+    /// beside the thread) doesn't leave the details a few letters wide. That
+    /// least gives way to the window less 8 a side, and never goes under the
+    /// box.
+    pub fn auto_width(box_width: f64, window: f64) -> f64 {
+        box_width.max(480_f64.min(window - 16.))
     }
 
     /// A dragged column: at least its least, and leaving the others theirs
@@ -474,7 +486,7 @@ mod tests {
             { "name": "compact", "description": "Clear but keep a summary", "argumentHint": "<optional instructions>", "source": "cli" },
             { "name": "context", "description": "Show current context usage", "source": "cli" },
             { "name": "cost", "description": "Show the total cost", "source": "cli", "scope": "system", "aliases": ["usage", "stats"] },
-            { "name": "code-review", "description": "Review the current diff", "argumentHint": "[low|medium|high] [target]", "source": "skill", "scope": "user", "path": "/home/mike/.claude/skills/code-review/SKILL.md" },
+            { "name": "code-review", "description": "Review the current diff", "argumentHint": "[low|medium|high] [target]", "source": "skill", "scope": "user", "path": "/home/alex/.claude/skills/code-review/SKILL.md" },
             { "name": "deslop", "description": "A second-pass cleanup", "source": "skill", "scope": "project", "path": "/x/.claude/skills/deslop/SKILL.md" },
             { "name": "ship", "description": "Drive a branch to merge-ready", "source": "skill" },
             { "bad": true }
@@ -488,7 +500,7 @@ mod tests {
         assert_eq!((mid.query.as_str(), mid.start, mid.mid_message()), ("de", 9, true));
         assert_eq!(typed("first line\n/sh").map(|t| t.start), Some(11), "after a line break");
         assert_eq!(typed("the /tmp/ folder"), None, "a space after it ends it");
-        assert_eq!(typed("look in /Users/mike"), None, "a path isn't a command");
+        assert_eq!(typed("look in /Users/alex"), None, "a path isn't a command");
         assert_eq!(typed("a/b"), None, "a slash inside a word");
         assert_eq!(typed("just words"), None);
         assert_eq!(typed("é then /x").map(|t| t.start), Some(8), "bytes, as the box counts");
@@ -515,7 +527,7 @@ mod tests {
         assert_eq!(query("/co"), Some("co"));
         assert_eq!(query("/code-review big"), None);
         assert_eq!(query("hello"), None);
-        assert_eq!(query("/Users/mike"), None);
+        assert_eq!(query("/Users/alex"), None);
         assert_eq!(query("/a\nb"), None);
     }
 
@@ -598,8 +610,8 @@ mod tests {
 
     #[test]
     fn short_paths_use_a_tilde() {
-        assert_eq!(short_path("/home/mike/.claude/x", "/home/mike"), "~/.claude/x");
-        assert_eq!(short_path("/opt/x", "/home/mike"), "/opt/x");
+        assert_eq!(short_path("/home/alex/.claude/x", "/home/alex"), "~/.claude/x");
+        assert_eq!(short_path("/opt/x", "/home/alex"), "/opt/x");
     }
 
     #[test]
@@ -611,6 +623,16 @@ mod tests {
         let (cats, list) = column_widths(420., 160., 300., false, 200., 120., 110.);
         assert_eq!(list, 120.);
         assert_eq!(cats, 110.);
+    }
+
+    #[test]
+    fn the_palette_is_as_wide_as_the_box_but_480_at_least() {
+        assert_eq!(PaletteLayout::auto_width(700., 1200.), 700.);
+        assert_eq!(PaletteLayout::auto_width(165., 560.), 480.);
+        // A window too narrow for 480 still leaves 8 a side...
+        assert_eq!(PaletteLayout::auto_width(300., 420.), 404.);
+        // ...but never makes it narrower than the box.
+        assert_eq!(PaletteLayout::auto_width(300., 250.), 300.);
     }
 
     #[test]
@@ -669,6 +691,11 @@ mod tests {
         assert_eq!(PaletteLayout::height_in(400., 200.), 220., "220 even in a short window");
         assert_eq!(PaletteLayout::width_in(300., 1200.), 480.);
         assert_eq!(PaletteLayout::width_in(2000., 1200.), 1120.);
+        // A window narrower than 480 and its margins: 8 in from each side, as
+        // one with none dragged (auto_width), not 480 and off the window.
+        assert_eq!(PaletteLayout::width_in(600., 380.), 364.);
+        assert_eq!(PaletteLayout::width_in(300., 420.), 404.);
+        assert_eq!(PaletteLayout::width_in(500., 520.), 480.);
         assert_eq!(PaletteLayout::column(50., 110., 400., 900.), 110.);
         assert_eq!(PaletteLayout::column(700., 110., 400., 900.), 500., "leaving the others theirs");
     }

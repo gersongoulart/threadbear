@@ -215,7 +215,7 @@ fn testFileToolsTitleTheFileThenItsFolder() {
 #[test]
 fn testFolderNames() {
     let home = text::home_directory();
-    assert_eq!(PathDisplay::folder("/Users/mike/dev/photo-sync/Sources/Upload/UploadTask.swift"), "Sources/Upload");
+    assert_eq!(PathDisplay::folder("/Users/alex/dev/photo-sync/Sources/Upload/UploadTask.swift"), "Sources/Upload");
     assert_eq!(PathDisplay::folder(&format!("{home}/a.txt")), "~");
     assert_eq!(PathDisplay::folder("~/a.txt"), "~");
     assert_eq!(PathDisplay::folder("/a.txt"), "");
@@ -289,7 +289,7 @@ fn approval_request(name: &str, input: Value) -> ApprovalRequest {
 
 #[test]
 fn testApprovalTitlesAndTargets() {
-    let write = approval_request("Write", json!({"file_path": "/Users/mike/dev/photo-sync/scripts/release.sh", "content": "x"}));
+    let write = approval_request("Write", json!({"file_path": "/Users/alex/dev/photo-sync/scripts/release.sh", "content": "x"}));
     assert_eq!(ApprovalText::title(&write), "Write release.sh?");
     assert_eq!(ApprovalText::target(&write), "Write release.sh");
     let bash = approval_request("Bash", json!({"command": "rm -rf .build DerivedData\necho done"}));
@@ -411,12 +411,12 @@ fn testPlanTitles() {
 
 #[test]
 fn testFoldersAreRelativeToTheThreadsFolder() {
-    let root = "/Users/mike/dev/photo-sync";
+    let root = "/Users/alex/dev/photo-sync";
     assert_eq!(PathDisplay::folder_relative(&format!("{root}/scripts/release.sh"), Some(root)), "scripts");
     assert_eq!(PathDisplay::folder_relative(&format!("{root}/Sources/Upload/UploadTask.swift"), Some(&format!("{root}/"))), "Sources/Upload");
     assert_eq!(PathDisplay::folder_relative(&format!("{root}/Package.swift"), Some(root)), "", "a file at the top has no folder");
     // Outside the thread's folder, or no folder: as before.
-    assert_eq!(PathDisplay::folder_relative("/Users/mike/dev/other/Sources/a.swift", Some(root)), "other/Sources");
+    assert_eq!(PathDisplay::folder_relative("/Users/alex/dev/other/Sources/a.swift", Some(root)), "other/Sources");
     assert_eq!(PathDisplay::folder_relative(&format!("{root}-old/a.swift"), Some(root)), "dev/photo-sync-old", "a sibling with the same prefix is outside");
     assert_eq!(PathDisplay::folder_relative(&format!("{root}/scripts/release.sh"), None), "photo-sync/scripts");
     assert_eq!(PathDisplay::folder_relative(&format!("{}/dev/x/a.txt", text::home_directory()), Some("~/dev")), "x");
@@ -425,7 +425,7 @@ fn testFoldersAreRelativeToTheThreadsFolder() {
 
 #[test]
 fn testFileRowsAndTheChangesCardUseTheThreadsFolder() {
-    let root = "/Users/mike/dev/photo-sync";
+    let root = "/Users/alex/dev/photo-sync";
     let path = format!("{root}/scripts/release.sh");
     let model = TranscriptModel::from_events(
         vec![user(1, "Go"), call_with(2, "w", "Write", "write", "Write", json!({"file_path": path, "content": "echo hi\n"})), result(3, "w"), done(4)],
@@ -439,7 +439,7 @@ fn testFileRowsAndTheChangesCardUseTheThreadsFolder() {
 
 #[test]
 fn testFieldKeysLineUpUpToACap() {
-    let fields = vec![Field::new("owner", "mike"), Field::new("pullNumber", "48"), Field::new("repo", "photo-sync")];
+    let fields = vec![Field::new("owner", "alex-example"), Field::new("pullNumber", "48"), Field::new("repo", "photo-sync")];
     assert_eq!(ToolPresentation::key_width(&fields, 16), 11, "\"pullNumber:\" is the widest");
     let mut long = fields;
     long.push(Field::new("a_really_long_parameter_name", "x"));
@@ -486,13 +486,29 @@ fn row_debug_events() -> Vec<Event> {
 #[test]
 fn testOriginIsReadAndCarriedToTheRow() {
     let e = event(1, "user.message", json!({"text": "Check your change.", "images": [], "origin": "runner"}));
-    assert_eq!(e.payload, EventPayload::UserMessage { text: "Check your change.".into(), images: vec![], origin: Some("runner".into()), answers: vec![], edit_of: None, review: None });
+    assert_eq!(e.payload, EventPayload::UserMessage { text: "Check your change.".into(), images: vec![], origin: Some("runner".into()), wake_reason: None, answers: vec![], edit_of: None, review: None });
     let model = from_events(vec![e, user(2, "Thanks")]);
     let (RowContent::User(runner), RowContent::User(mike)) = (&model.items()[0].content, &model.items()[1].content) else { panic!("users") };
     assert!(runner.is_from_runner());
     assert!(!mike.is_from_runner());
     // Still a user row: it starts the turn the runner asked for.
     assert_eq!(model.items()[0].kind(), RowKind::User);
+}
+
+#[test]
+fn testRunnerNoteSaysWhyFromItsWakeReason() {
+    let header = |fields: Value| {
+        let model = from_events(vec![event(1, "user.message", fields)]);
+        let RowContent::User(message) = &model.items()[0].content else { panic!("a user") };
+        message.runner_header()
+    };
+    // A login move isn't a restart, so it mustn't say one.
+    assert_eq!(header(json!({"text": "Carry on.", "images": [], "origin": "runner", "wakeReason": "Moved to another login"})), "Sent by the runner: moved to another login");
+    assert_eq!(header(json!({"text": "Carry on.", "images": [], "origin": "runner", "wakeReason": "The login had room again"})), "Sent by the runner: the login had room again");
+    // A restart, or an older runner that sends no reason, keeps the old line.
+    assert_eq!(header(json!({"text": "Carry on.", "images": [], "origin": "runner", "wakeReason": "The runner restarted"})), "Sent by the runner after it restarted");
+    assert_eq!(header(json!({"text": "Carry on.", "images": [], "origin": "runner", "wakeReason": "The runner came back"})), "Sent by the runner after it restarted");
+    assert_eq!(header(json!({"text": "Carry on.", "images": [], "origin": "runner"})), "Sent by the runner after it restarted");
 }
 
 #[test]

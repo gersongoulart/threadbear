@@ -39,6 +39,8 @@ export type InitializeResult = {
   };
   agentInfo?: { name?: string; version?: string } | null;
   authMethods?: { id?: string; name?: string }[];
+  // Grok says who it is here: grokShell, and agentVersion for want of agentInfo.
+  _meta?: { grokShell?: unknown; agentVersion?: unknown } | null;
 };
 
 export type AcpTimings = {
@@ -58,6 +60,8 @@ export type AcpProcessOptions = {
   label: string; // the thread id, or "models:opencode-main", for log lines
   maxLineBytes?: number;
   timings?: Partial<AcpTimings>;
+  // Offer form elicitation (questions for Mike): only a thread can show one.
+  forms?: boolean;
 };
 
 // The ACP version this client speaks; initialize's answer must match it.
@@ -144,7 +148,7 @@ export class AcpProcess {
         protocolVersion: ACP_VERSION,
         // Nothing the agent could use to read or write through the client:
         // it works on the files itself, and asks first (AcpSession).
-        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false, ...(opts.forms ? { elicitation: { form: {} } } : {}) },
         clientInfo: { name: 'threadbear', title: 'Threadbear', version: RUNNER_VERSION },
       })
         .then((init) => {
@@ -152,6 +156,7 @@ export class AcpProcess {
             throw new Error(`This agent speaks ACP version ${String(init?.protocolVersion)}, and Threadbear speaks ${ACP_VERSION}.`);
           }
           if (typeof init?.agentInfo?.version === 'string') this.version = init.agentInfo.version;
+          else if (typeof init?._meta?.agentVersion === 'string') this.version = init._meta.agentVersion;
           settled = true;
           resolve(init ?? {});
         })

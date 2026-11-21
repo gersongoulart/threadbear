@@ -23,14 +23,14 @@ Feature: The Updates panel
     And the Updates panel lists "Claude Code 2.1.312, up to date (automatic)"
 
   @updates.panel
-  Scenario: Reinstall now reinstalls the runner from the panel, with no command to copy
+  Scenario: Update it updates Threadbear Runner from the panel, with no command to copy
     When the runner says Threadbear Runner.app is behind main
     And I open the Updates panel
-    Then the Updates panel lists "Threadbear Runner.app was built from older launcher sources than main's. Reinstalling restarts the runner, so it waits until no thread is busy."
-    And the Updates panel lists "  [Reinstall now]"
-    When I press "Reinstall the runner once no thread is busy" in the Updates panel
-    Then the Updates panel lists "Reinstalling the runner. It restarts, and is back in a minute or so."
-    And the Updates panel lists "  [Reinstalling: busy]"
+    Then the Updates panel lists "Threadbear Runner.app was built from older launcher sources than main's. Updating it stops nothing; the new one starts next time your Mac restarts."
+    And the Updates panel lists "  [Update it]"
+    When I press "Put the new Threadbear Runner in place" in the Updates panel
+    Then the Updates panel lists "Updating Threadbear Runner. Nothing stops; the new one starts next time your Mac restarts."
+    And the Updates panel lists "  [Updating: busy]"
     And the Updates panel lists "The runner is up to date."
 
   @updates.panel
@@ -41,6 +41,21 @@ Feature: The Updates panel
     And the Updates panel lists "  Runners in the app"
     When I press "Start a thread that merges Mike's release into your main" in the Updates panel
     Then a thread called "Bring in Mike's release of 10 Nov" opens
+
+  # The What's new page's cards for the releases a fork doesn't have
+  # (protocol "Mike's releases", changelog), which Mike picked over the
+  # notes as text on 17 Nov 2026. A release the page has no entry for yet
+  # keeps its notes.
+  @updates.panel @swift-pending
+  Scenario: Mike's releases show the What's new page's cards, counts and important fixes
+    When Mike has releases of 14 to 16 Nov with cards on the What's new page
+    And I open the Updates panel
+    Then the Updates panel lists "[card] Pick who reviews code -> https://threadbear.mikecann.app/changelog#2026-11-16"
+    And the Updates panel lists "[card] Open Anything (clip) -> https://threadbear.mikecann.app/changelog#2026-11-14"
+    And the Updates panel lists "6 added, 20 changed, 14 fixed [See all -> https://threadbear.mikecann.app/changelog]"
+    And the Updates panel lists "2 important fixes (tip: Pairing used a reusable token; A swapped file could launch an app)"
+    And the Updates panel lists "## 15 Nov"
+    And the Updates panel lists "  A note for a day the page hasn't got yet"
 
   # Someone's fork with changes of their own to the old Swift app (protocol
   # "Your changes to the old app"). The Swift app has nothing to rebuild.
@@ -60,22 +75,35 @@ Feature: The Updates panel
 
   # The app's own update is made up (`updates` with `preview`): a scripted
   # app never follows main, as only the installed one does.
+  # Exercised by core's BuildDebounce tests and remote lease tests. An
+  # installed updater is required to observe this over real landings.
+  @system.selfupdate @swift-pending @manual
+  Scenario: Automatic update builds leave queued screen tests and timings ahead
+    When several changes to the desktop app land on main within ten minutes
+    Then the updater waits until the latest desktop tree has settled for ten minutes
+    And it requests only that latest tree once no update build is running
+    And a busy build Mac or one with timings queued makes it try again later
+    And a build already running finishes with the host kept exclusive
+
   @system.selfupdate
   Scenario: The app's next version waiting says so in the Updates panel
     When the app's next version, def5678, is ready
     And I open the Updates panel
     Then the Updates panel lists "The app's next version (def5678) is ready. It switches in when you're not using the app, or now."
 
-  # Mike, 13 Nov, after one sat staged with no word of why. In front, with
-  # nothing in the way, it counts down from 5 s and starts again at any input
-  # (core's restart_wait tests that, as a scripted app is kept behind).
+  # A message typed and not sent goes across a restart in the drafts file, so
+  # it doesn't hold one off: Mike, 19 Nov, "just restart and put the text
+  # back in the box". In front, it counts down from 5 s and starts again at
+  # any input (core's restart_wait tests that, as a scripted app is kept
+  # behind).
   @system.selfupdate @swift-pending
-  Scenario: The app's next version says what it's waiting for
+  Scenario: A message typed and not sent doesn't hold the next version
     When I open the thread "Morning brief"
     And I type "half a thought" in the composer
     And the app's next version, def5678, is ready
     And I open the Updates panel
-    Then the Updates panel lists "The app's next version (def5678) is ready. It switches in once the message box in “Morning brief” is sent or cleared, or now."
+    Then the Updates panel lists "The app's next version (def5678) is ready. It switches in when you're not using the app, or now."
+    And a restart onto it waits for nothing
 
   # The Swift app's menu bar didn't show the made-up update's item within 5 s
   # of a script making it up (its SwiftUI commands, read by `menus`), so this
@@ -92,6 +120,12 @@ Feature: The Updates panel
     And I open the Updates panel
     Then the Updates panel lists "The app has a new version on main, waiting for a Mac to build it on."
 
+  @system.selfupdate @swift-pending
+  Scenario: A new version waits for nearby changes to settle before building
+    When the app's next version is waiting for main to settle
+    And I open the Updates panel
+    Then the Updates panel lists "The app has a new version on main, waiting for ten quiet minutes before building."
+
   # Check hosts only run tests: what an update's build host sends back runs
   # here, so it's only one named in updateBuildHosts (Daybreak 108). With
   # check hosts and none of those it builds nowhere and asks for one.
@@ -103,17 +137,18 @@ Feature: The Updates panel
 
   # Going in by itself: straight away with another app in front, and in front
   # once it's had five seconds with no input (core's should_auto_restart, with
-  # its tests), but never over words typed or a menu that's open. The GPUI app
+  # its tests), but never over a menu that's open. Words typed in the message
+  # box go across in the drafts file, so they don't hold it. The GPUI app
   # says what its once-a-second look sees (`updates` with `restartCheck`), as
   # a scripted app never restarts. The Swift app restarts in front only when
   # its handover would go unseen, and has no such check.
   @system.selfupdate @swift-pending
-  Scenario: The next version waits to go in while words are typed or a menu is open
+  Scenario: The next version waits to go in while a menu is open, not for words typed
     When the app's next version, def5678, is ready
     And I open the thread "Morning brief"
     Then a restart onto it waits for nothing
     When I type "half a thought" in the composer
-    Then a restart onto it waits for the words typed
+    Then a restart onto it waits for nothing
     When I clear the composer
     Then a restart onto it waits for nothing
     When I open the Hibernate menu for "Morning brief"
@@ -121,23 +156,37 @@ Feature: The Updates panel
 
   # Codex's review of the restart, 12 Nov: a card's own answer, a shell
   # running something or typed in, and where the app comes back to.
+  # A card's own answer goes across a restart in the drafts file, so it
+  # doesn't hold one off: Mike, 19 Nov, "just reboot and then just put the
+  # text back in the box".
   @system.selfupdate @swift-pending
-  Scenario: The next version waits while my own answer to a card isn't sent
+  Scenario: My own answer to a card doesn't hold the next version, and comes back after it
     When the app's next version, def5678, is ready
     And I open the thread "Ship the beta to TestFlight"
+    And I pick answer 1 of ask 1 on the card
+    And I write "not before Friday" as my own answer to ask 2
     Then a restart onto it waits for nothing
-    When I write "not before Friday" as my own answer to ask 1
-    Then a restart onto it waits for the words typed
+    When I wait a moment
+    And the app is quit and opened again
+    And I open the thread "Ship the beta to TestFlight"
+    Then ask 2 on the card is answered "something else: \"not before Friday\""
+    And ask 1 on the card is answered "done"
 
   # Which field, not just "a field": a hold on words typed somewhere sat for
-  # hours on 13 Nov with nobody able to find the box.
+  # hours on 13 Nov with nobody able to find the box. And which thread, with
+  # a way there: on 19 Nov one held it and he couldn't tell whose.
   @system.selfupdate @swift-pending
-  Scenario: The next version names the field it's waiting for
+  Scenario: The next version names the field it's waiting for, and its thread
     When the app's next version, def5678, is ready
     And I open the thread "Ship the beta to TestFlight"
-    And I write "not before Friday" as my own answer to ask 1
+    # The panel first: a click on its icon mid-rename ends the rename
+    # (Windows saves it as the box loses focus), and nothing's held then.
     And I open the Updates panel
-    Then the Updates panel lists "The app's next version (def5678) is ready. It switches in once what you're typing in a card's Something else box is sent, saved or cleared, or now."
+    And I start renaming the open thread
+    And I type "Beta on Friday" where the cursor is
+    Then a restart onto it waits for the words typed
+    And the Updates panel lists "The app's next version (def5678) is ready. It switches in once what you're typing in the title box in “Ship the beta to TestFlight” is sent, saved or cleared, or now."
+    And the Updates panel lists "  > Ship the beta to TestFlight"
 
   # Windows has no foreground-process check for ConPTY yet. Every live shell
   # holds a restart, as it could be running a command the app cannot see.

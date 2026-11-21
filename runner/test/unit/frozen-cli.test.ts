@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { makeHarness, tick } from '../helpers/fakes.ts';
+import { onlyOnWindows, skipOnWindows } from '../helpers/platform.ts';
 import { nullLogger } from '../../src/log.ts';
 import { FrozenClis, QUIET_MS, STOP_AFTER_MS, SWEEP_MS, fileCallInSample, parseProcs, realProbe, sampleSandbox, type FrozenProbe, type Proc } from '../../src/frozen-cli.ts';
 
@@ -24,7 +25,7 @@ class FakeProbe implements FrozenProbe {
 function setUp() {
   const h = makeHarness();
   const probe = new FakeProbe();
-  const check = new FrozenClis({ host: h.runner, clock: h.clock, log: nullLogger, machine: 'bruce', probe });
+  const check = new FrozenClis({ host: h.runner, clock: h.clock, log: nullLogger, machine: 'mac-mini', probe });
   const { thread } = h.runner.create({ text: 'Print the plans', accountId: 'claude-3' });
   const s = h.adapter.last;
   s.init();
@@ -46,7 +47,7 @@ test('a frozen CLI is told about at the second look, and the thread needs you', 
   assert.deepEqual(notes(), [], 'once could be a slow disk');
   await look();
   assert.equal(notes().length, 1);
-  assert.match(notes()[0], /Claude Code is stuck opening a file on bruce/);
+  assert.match(notes()[0], /Claude Code is stuck opening a file on mac-mini/);
   assert.match(notes()[0], /permission prompt/);
   assert.equal(summary().needsYou, true);
   await look();
@@ -101,7 +102,7 @@ test('a CLI still frozen after the wait is stopped, the turn fails and the next 
   assert.equal(s.killed, true);
   const ends = h.events(thread.id).filter((e) => e.type === 'turn.completed');
   assert.equal(ends.at(-1)!.outcome, 'failed');
-  assert.match(String(ends.at(-1)!.error), /stuck opening a file on bruce/);
+  assert.match(String(ends.at(-1)!.error), /stuck opening a file on mac-mini/);
   assert.equal(h.runner.list().find((t) => t.id === thread.id)!.needsYou, true);
   h.runner.send(thread.id, 'Try again', []);
   await tick();
@@ -172,9 +173,36 @@ test('the real probe sees a process blocked in open', { skip: process.platform !
   }
 });
 
-test('sample is kept away from what macOS asks about', () => {
+test('sample is kept away from what macOS asks about', skipOnWindows("sample and its sandbox profile are macOS's"), () => {
   const profile = sampleSandbox('/Users/me');
   for (const p of ['/Volumes', '/Users/me/Downloads', '/Users/me/Documents', '/Users/me/Desktop', '/Users/me/Library/Mobile Documents']) {
     assert.ok(profile.includes(`(subpath "${p}")`), p);
   }
+});
+
+// ps, sandbox-exec and sample are how it looks at a CLI, and Windows has none of
+// them. Each due sweep used to try /bin/ps and log a warning that it failed.
+test('on Windows, with no probe given, the check is off: nothing is armed and a sweep logs nothing', onlyOnWindows('Only Windows has no ps and sample to look with'), async () => {
+  const h = makeHarness();
+  const warnings: string[] = [];
+  const log = { ...nullLogger, warn: (m: string) => void warnings.push(m) };
+  const check = new FrozenClis({ host: h.runner, clock: h.clock, log, machine: 'pc' });
+  h.runner.create({ text: 'Print the plans', accountId: 'claude-3' });
+  h.adapter.last.init();
+  const timers = h.clock.pending();
+  check.start();
+  assert.equal(h.clock.pending(), timers, 'no timer to wake it');
+  h.clock.advance(QUIET_MS + SWEEP_MS);
+  await check.sweep();
+  assert.deepEqual(warnings, []);
+  check.stop();
+});
+
+test('a probe given to it is used on every platform', async () => {
+  const h = makeHarness();
+  const check = new FrozenClis({ host: h.runner, clock: h.clock, log: nullLogger, machine: 'pc', probe: new FakeProbe() });
+  const timers = h.clock.pending();
+  check.start();
+  assert.equal(h.clock.pending(), timers + 1);
+  check.stop();
 });

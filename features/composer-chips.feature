@@ -44,11 +44,11 @@ Feature: The chips under the message box
   @composer.modelpicker @swift-pending
   Scenario: A thread pinned to a login says so in the model picker, and Auto hands it back to a pool
     When I open the thread "Compare SQLite and plain files for the runner"
-    Then the "model" menu has a row "# Pinned to mike+3"
-    And the "model" menu has a row "--- Login: mike+3"
-    And the "model" menu has a row "[x] mike+3"
+    Then the "model" menu has a row "# Pinned to alex+3"
+    And the "model" menu has a row "--- Login: alex+3"
+    And the "model" menu has a row "[x] alex+3"
     When I pick "Login: Auto" from the "model" menu
-    Then the "model" menu has no row "--- Login: mike+3"
+    Then the "model" menu has no row "--- Login: alex+3"
     And the "model" menu has a row "--- Login: Auto"
     And the "model" menu has a row "[x] Auto - The pool picks"
 
@@ -56,12 +56,12 @@ Feature: The chips under the message box
   Scenario: A pool thread's Login line says Auto, and picking a login pins the thread to it
     Then the "model" menu has a row "--- Login: Auto"
     And the "model" menu has a row "[x] Auto - The pool picks, and moves on when one runs out"
-    And the "model" menu has a row "[ ] mike+3"
-    When I pick "Login: mike+3" from the "model" menu
+    And the "model" menu has a row "[ ] alex+3"
+    When I pick "Login: alex+3" from the "model" menu
     Then the "model" menu has no row "--- Login: Auto"
-    And the "model" menu has a row "--- Login: mike+3"
-    And the "model" menu has a row "[x] mike+3"
-    And the "model" menu has a row "# Pinned to mike+3"
+    And the "model" menu has a row "--- Login: alex+3"
+    And the "model" menu has a row "[x] alex+3"
+    And the "model" menu has a row "# Pinned to alex+3"
 
   # A login, pool or folder change can't be guessed, so the chip that shows it
   # spins and takes no clicks until the runner has made it (the every-click
@@ -91,14 +91,14 @@ Feature: The chips under the message box
     And the window is 560 points wide
     Then the chips under the box fit inside it
 
-  # Without pools there's a login chip: another Mac's thread, as bruce has none.
+  # Without pools there's a login chip: another Mac's thread, as mac-mini has none.
   @composer.account @remote-threads
   Scenario: The login picker groups the logins by provider, with the room each has left
     When I open the thread "Check the photo library backup"
     Then the "account" menu has a row "# Claude"
-    And the "account" menu has a row "[x] mike@example.com - week 78%, resets"
+    And the "account" menu has a row "[x] alex@example.com - week 78%, resets"
     And the "account" menu has a row "# Codex"
-    And the "account" menu has a row "[ ] mike@example.com - week 64%, resets"
+    And the "account" menu has a row "[ ] alex@example.com - week 64%, resets"
     And the "account" menu has a row "--- Usage from Token Stats at"
 
   @composer.schedulefromsend
@@ -146,3 +146,24 @@ Feature: The chips under the message box
     And I paste the picture into the composer
     And the composer holds 2 pictures
     Then clicking the thumbnail of picture 1 opens picture 1 of 2
+
+  @composer.chiphover @swift-pending
+  Scenario: Many pictures wrap onto more rows, and the last one can still be opened
+    When the window is 1000 points wide
+    And I paste the picture into the composer 8 times
+    And the composer holds 8 pictures
+    Then clicking the thumbnail of picture 8 opens picture 8 of 8
+
+  # The × over a thumbnail is an edit ⌘Z takes back, and the chip it brings
+  # back has to bring its picture: it came back empty, and the message then
+  # went without the picture (Codex's review of the ⌘Z fix, 18 Nov).
+  @composer.picturechips @swift-pending
+  Scenario: Undoing a picture's × brings the picture back with its chip
+    When I type "Look at this" in the composer
+    And I paste the picture into the composer
+    And the composer holds 1 picture
+    And I remove picture 1 with its ×
+    Then the composer holds 0 pictures
+    When I put the cursor in the composer
+    And I press ⌘Z
+    Then the composer holds 1 picture

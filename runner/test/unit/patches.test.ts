@@ -20,7 +20,7 @@ function project(home: string, rel: string, files: Record<string, string | null>
 
 test('a folder with convex/ gets the dashboard panel for its deployment', () => {
   const home = tmpDir();
-  const dir = project(home, 'dev/app', { convex: null, 'package.json': '{}', '.env.local': 'CONVEX_DEPLOYMENT=dev:happy-otter-123 # team: mike\nCONVEX_URL=https://happy-otter-123.convex.cloud\n' });
+  const dir = project(home, 'dev/app', { convex: null, 'package.json': '{}', '.env.local': 'CONVEX_DEPLOYMENT=dev:happy-otter-123 # team: alex\nCONVEX_URL=https://happy-otter-123.convex.cloud\n' });
   const panels = projectPanels(dir, home);
   assert.equal(panels.length, 1);
   assert.deepEqual(checkPanel(panels[0] as never), []);
@@ -33,9 +33,9 @@ test('a folder with convex/ gets the dashboard panel for its deployment', () => 
 
 test('the Convex panel names the project convex dev noted after the deployment', () => {
   const home = tmpDir();
-  const dir = project(home, 'dev/walkies', { convex: null, 'package.json': '{}', '.env.local': '# Deployment used by `npx convex dev`\nCONVEX_DEPLOYMENT=dev:happy-otter-123 # team: mike, project: walkies\nCONVEX_URL=https://happy-otter-123.convex.cloud\n' });
+  const dir = project(home, 'dev/walkies', { convex: null, 'package.json': '{}', '.env.local': '# Deployment used by `npx convex dev`\nCONVEX_DEPLOYMENT=dev:happy-otter-123 # team: alex, project: walkies\nCONVEX_URL=https://happy-otter-123.convex.cloud\n' });
   assert.deepEqual(projectPanels(dir, home)[0].convex, {
-    deployment: 'happy-otter-123', deploymentUrl: 'https://happy-otter-123.convex.cloud', team: 'mike', project: 'walkies',
+    deployment: 'happy-otter-123', deploymentUrl: 'https://happy-otter-123.convex.cloud', team: 'alex', project: 'walkies',
   });
 });
 
@@ -279,13 +279,13 @@ test('hooks in a patch file: shape, defaults and the edited glob', () => {
 
 test('a folder that is only called convex is not a Convex project', async () => {
   const home = tmpDir();
-  // Like ~/dev/convex: a folder of repos, no package.json beside it.
-  project(home, 'dev/convex/some-repo');
-  const thread = project(home, 'dev/me/misc');
+  // Like ~/dev/work: a folder of repos, no package.json beside it.
+  project(home, 'dev/work/some-repo');
+  const thread = project(home, 'code/misc');
   assert.deepEqual(projectPanels(thread, home), []);
   assert.deepEqual((await loadPatchSet(thread, home)).patches, []);
   // convex.json alone is enough.
-  const cfg = project(home, 'dev/me/app', { convex: null, 'convex.json': '{}' });
+  const cfg = project(home, 'code/app', { convex: null, 'convex.json': '{}' });
   assert.equal(projectPanels(cfg, home)[0]?.id, 'convex.dashboard');
 });
 
@@ -383,6 +383,8 @@ test('a panel with an items function is a list panel, filled by renderListPanel 
           (await sh("echo from-sh")).trim(),
           { title: "", detail: "dropped: no title" },
           { title: "odd", tone: "loud", extra: 1 },
+          { title: "bundle", tone: "warning" },
+          { title: "typecheck", tone: "working" },
           { title: "grouped", section: " Shipped · 2 ", trailing: "5d" },
           { title: "long", section: "x".repeat(200), trailing: "y".repeat(50) },
           { title: "blank", section: "  ", trailing: 3 },
@@ -413,6 +415,8 @@ test('a panel with an items function is a list panel, filled by renderListPanel 
       { title: 'main', detail: app, tone: 'done' },
       { title: 'from-sh' },
       { title: 'odd' },
+      { title: 'bundle', tone: 'warning' },
+      { title: 'typecheck', tone: 'working' },
       { title: 'grouped', section: 'Shipped · 2', trailing: '5d' },
       { title: 'long', section: 'x'.repeat(80), trailing: 'y'.repeat(24) },
       { title: 'blank' },

@@ -150,7 +150,7 @@ test('a home folder and external volumes are not looked through', async () => {
   files(home, { '.env': `A_SECRET=${value}\n` });
   const known = new KnownValues({ env: {}, home });
   known.noteFolder(home);
-  known.noteFolder('/Volumes/CannMedia/thing');
+  known.noteFolder('/Volumes/MediaDrive/thing');
   known.noteFolder('relative/path');
   await known.settled();
   assert.equal(known.count, 0);
@@ -233,6 +233,7 @@ test('commands whose output is withheld', () => {
     'openssl genrsa 2048',
     'tb phone-token',
     'npx convex run tokens:issue \'{"name":"x"}\'',
+    'npx convex run tokens:issueCode \'{"name":"x","kind":"browser"}\'',
     'npx convex deployment token create x',
     'git credential fill',
     'cat .env',
