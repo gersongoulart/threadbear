@@ -370,4 +370,7 @@
 //    changed login, as the Mac does. Without it the page is as before, for
 //    apps built earlier. phone:thread, phone:search and share's page still
 //    leave them out.
-export const API_VERSION = 79;
+// 80: owner-key relay calls can check and create conversation forks on the
+// thread's owning runner. Fork choices are validated before being queued.
+// 81: message forks preserve the validated inclusive throughTurnId boundary.
+export const API_VERSION = 81;

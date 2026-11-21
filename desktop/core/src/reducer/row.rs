@@ -28,11 +28,13 @@ pub struct Row {
     /// Shown inside an open work group. Set on display rows only; the same
     /// item renders differently there.
     pub in_group: bool,
+    /// Provenance is visible and its source link remains usable.
+    pub fork_note: bool,
 }
 
 impl Row {
     pub fn new(id: &str, seq: i64, turn_id: Option<String>, content: RowContent) -> Row {
-        Row { id: id.to_owned(), version: 0, seq, turn_id, content, in_group: false }
+        Row { id: id.to_owned(), version: 0, seq, turn_id, content, in_group: false, fork_note: false }
     }
 
     pub fn kind(&self) -> RowKind {

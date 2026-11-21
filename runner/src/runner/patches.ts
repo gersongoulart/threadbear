@@ -846,7 +846,7 @@ export const patchesPart = {
   // as the next runner would start its CLI before the setup was done
   // (Codex's review). Each takes seconds, or the setup's own time limit.
   threadsBetweenTurns(this: Runner): string[] {
-    return [...this.threads.values()].filter((st) => (st.rt.editing || st.rt.preparing) && !st.rt.deleted).map((st) => st.rec.id);
+    return [...this.threads.values()].filter((st) => (st.rt.forking || st.rt.editing || st.rt.preparing || this.worktreeCleanup(st)) && !st.rt.deleted).map((st) => st.rec.id);
   },
 
   async runHookList(this: Runner, st: ThreadState, hooks: PatchSet['hooks']): Promise<void> {
@@ -932,6 +932,8 @@ export const patchesPart = {
   // time per thread.
   async runAction(this: Runner, threadId: string, actionId: string): Promise<{ turnId?: string; ok?: boolean; exitCode?: number; durationMs?: number; seq?: number }> {
     const st = this.mustGet(threadId);
+    if (st.rt.forking) throw new RpcError(ErrorCode.busy, 'This conversation is being forked. Try again in a moment.');
+    if (this.worktreeCleanup(st)) throw new RpcError(ErrorCode.busy, 'This shared worktree is being cleaned up. Try again in a moment.');
     const set = this.patchSet(st);
     const action = this.actionsOf(st, set).find((a) => a.id === actionId);
     if (!action) throw new RpcError(ErrorCode.badParams, `This thread has no action called ${actionId}`);

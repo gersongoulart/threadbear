@@ -53,6 +53,7 @@ export type Thread = {
 };
 
 export type Dump = {
+  forkSheet?: { source: string; throughTurnId?: string | null; requestId: string; workspace: string; info: { available: boolean; reason?: string; workspace?: { root: string; head: string; untracked: string[] } } | null; asking: boolean; creating: boolean; error: string | null; canFork: boolean; excludedFiles: string | null } | null;
   connection: string;
   selection?: Thread | null;
   sidebar: {

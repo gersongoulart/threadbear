@@ -1462,7 +1462,7 @@ pub enum EventPayload {
     /// `woke_by`: what finished and started a turn the agent began by itself.
     TurnStarted { woke_by: Vec<BackgroundTask> },
     TurnCompleted(TurnCompletion),
-    SystemNote(String),
+    SystemNote { text: String, fork: bool },
     Error(String),
     ActionRun(ActionRun),
     /// The ticks on the card of asks that came with the turn.completed at
@@ -1622,7 +1622,7 @@ fn decode_payload(type_: &str, c: &Object) -> Result<EventPayload, ()> {
             EventPayload::TurnStarted { woke_by }
         }
         "turn.completed" => EventPayload::TurnCompleted(TurnCompletion::decode(c)),
-        "system.note" => EventPayload::SystemNote(TextFields::decode(c).text),
+        "system.note" => EventPayload::SystemNote { text: TextFields::decode(c).text, fork: c.get("fork").and_then(Value::as_bool).unwrap_or(false) },
         "error" => {
             let f = TextFields::decode(c);
             EventPayload::Error(f.message.or_else(|| string(c, "text")).unwrap_or_else(|| "Something went wrong".to_owned()))

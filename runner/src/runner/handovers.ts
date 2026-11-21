@@ -48,7 +48,7 @@ export const handoversPart = {
       // (readyToHandOver): the new runner would wake it. And one going back
       // to an earlier message: letting it go mid-edit saved the record from
       // before the cut, after the files had been put back (13 Nov 2026).
-      keep: new Set([...keep, ...[...this.threads.values()].filter((st) => st.rt.cleaning || st.rt.preparing || st.rt.hooksRunning || st.rt.editing || st.rec.wakeWhen?.pending).map((st) => st.rec.id)].filter((id) => this.threads.has(id))),
+      keep: new Set([...keep, ...[...this.threads.values()].filter((st) => st.rt.cleaning || this.worktreeCleanup(st) || st.rt.preparing || st.rt.hooksRunning || st.rt.editing || st.rt.forking || st.rec.wakeWhen?.pending).map((st) => st.rec.id)].filter((id) => this.threads.has(id))),
       going: new Set(),
       gone: new Set(),
       onHandedOver: opts.onHandedOver,
@@ -161,7 +161,7 @@ export const handoversPart = {
     const { rt } = st;
     // A new worktree still being made or set up (Stop pressed during it):
     // the next runner would start its CLI before the setup is done.
-    if (rt.turn || rt.approvals.size || rt.wakeTimer || rt.hooksRunning || rt.runningActions?.size || rt.editing || rt.preparing) return false;
+    if (rt.turn || rt.approvals.size || rt.wakeTimer || rt.hooksRunning || rt.runningActions?.size || rt.editing || rt.forking || rt.preparing || this.worktreeCleanup(st)) return false;
     // Hibernating in words: its model is still working out when. Crossing
     // now, the new runner would wake it (wakesOnStart) and this one's answer
     // would go nowhere. Not past DRAIN_MAX_OLD_MS, as for background work.

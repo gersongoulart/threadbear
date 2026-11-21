@@ -76,6 +76,12 @@ function listOf(v: unknown, kind: 'object' | 'string' | 'number'): unknown[] | u
 }
 export function normaliseRecord(rec: Record<string, unknown>): boolean {
   const before = JSON.stringify(rec);
+  if (rec.forkedFrom !== undefined) {
+    const fork = rec.forkedFrom;
+    const uuid = (value: unknown) => typeof value === 'string' && /^[a-f0-9-]{36}$/i.test(value);
+    if (!isObject(fork) || !uuid(fork.threadId) || !uuid(fork.requestId) || typeof fork.title !== 'string' || !Number.isSafeInteger(fork.seq) || (fork.seq as number) < 1 || !['same', 'worktree'].includes(String(fork.workspace))) delete rec.forkedFrom;
+    else rec.forkedFrom = { threadId: fork.threadId, requestId: fork.requestId, title: fork.title.slice(0, 200), seq: fork.seq, workspace: fork.workspace, ...(typeof fork.throughTurnId === 'string' && fork.throughTurnId.length > 0 && fork.throughTurnId.length <= 256 ? { throughTurnId: fork.throughTurnId } : {}) };
+  }
   for (const k of OBJECTS) if (rec[k] !== undefined && !isObject(rec[k])) delete rec[k];
   for (const [k, kind] of [...OBJECT_LISTS.map((k) => [k, 'object'] as const), ...STRING_LISTS.map((k) => [k, 'string'] as const), ...NUMBER_LISTS.map((k) => [k, 'number'] as const)]) {
     if (rec[k] === undefined) continue;
@@ -118,6 +124,7 @@ export function normaliseRecord(rec: Record<string, unknown>): boolean {
 }
 
 export type ThreadRecord = {
+  forkedFrom?: { threadId: string; title: string; seq: number; requestId: string; workspace: 'same' | 'worktree'; throughTurnId?: string };
   id: string;
   title: string;
   cwd: string;

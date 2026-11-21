@@ -117,6 +117,7 @@ export type CommandPlan =
 // command of the same name (its adapter adds the skill to the message).
 export function planCommand(provider: Provider, cmd: ParsedCommand, skills: ReadonlySet<string> = new Set()): CommandPlan {
   const name = cmd.name.toLowerCase();
+  if (name === 'fork') return { kind: 'note', text: 'Choose Fork… from the thread menu in the desktop app to copy this conversation and choose its folder.' };
   if (name === 'model') return { kind: 'model', args: cmd.args };
   if (name === 'effort') return { kind: 'effort', args: cmd.args };
   if (provider === 'claude') {

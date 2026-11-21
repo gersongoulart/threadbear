@@ -156,7 +156,7 @@ type Kind = (typeof KINDS)[number];
 // with no file contents or tool output in them (step 4 brings those, scrubbed).
 // moves.describe and moves.preview (API 65) are the Mac's Move sheet
 // (threads.movePreview): plans only, nothing starts.
-export const CALLS = new Set(['files.list', 'moves.describe', 'moves.preview']);
+export const CALLS = new Set(['files.list', 'moves.describe', 'moves.preview', 'threads.forkInfo', 'threads.fork']);
 // A moves.preview's thread description: only these fields, each a short
 // string (or worktree and schedules), so nothing else sits in the row.
 const MOVE_INFO_STRINGS = ['title', 'cwd', 'home', 'provider', 'accountId', 'email', 'model', 'effort', 'permissionMode', 'origin', 'repoTop', 'subdir', 'sessionId'];
@@ -261,6 +261,16 @@ export function commandArgs(kind: Kind, raw: unknown): Record<string, unknown> {
       if (a.method === 'moves.preview') {
         const p = (a.params && typeof a.params === 'object' ? a.params : {}) as Record<string, unknown>;
         out = { method: a.method, params: { info: moveInfoArg(p.info), ...(typeof p.cwd === 'string' ? { cwd: p.cwd } : {}), ...(typeof p.accountId === 'string' ? { accountId: p.accountId } : {}) } };
+      } else if (a.method === 'threads.fork') {
+        const p = (a.params && typeof a.params === 'object' ? a.params : {}) as Record<string, unknown>;
+        if (p.workspace !== 'same' && p.workspace !== 'worktree') throw bad('workspace must be same or worktree');
+        if (typeof p.requestId !== 'string' || !/^[a-f0-9-]{36}$/i.test(p.requestId)) throw bad('requestId must be a UUID');
+        if (p.throughTurnId !== undefined && (typeof p.throughTurnId !== 'string' || !p.throughTurnId || p.throughTurnId.length > 256)) throw bad('throughTurnId must name a completed reply');
+        out = { method: a.method, params: { workspace: p.workspace, requestId: p.requestId, ...(p.throughTurnId === undefined ? {} : { throughTurnId: p.throughTurnId }) } };
+      } else if (a.method === 'threads.forkInfo') {
+        const p = (a.params && typeof a.params === 'object' ? a.params : {}) as Record<string, unknown>;
+        if (p.throughTurnId !== undefined && (typeof p.throughTurnId !== 'string' || !p.throughTurnId || p.throughTurnId.length > 256)) throw bad('throughTurnId must name a completed reply');
+        out = { method: a.method, params: p.throughTurnId === undefined ? {} : { throughTurnId: p.throughTurnId } };
       } else if (a.method === 'moves.describe') {
         out = { method: a.method, params: {} };
       } else {
@@ -295,6 +305,8 @@ export const queueCommand = mutation({
   handler: async (ctx, { key, runnerId, threadId, kind, args }) => {
     await runnerAuth(ctx, key, 'queueCommand');
     checkRunnerId(runnerId);
+    const method = kind === 'call' && args && typeof args === 'object' ? (args as { method?: unknown }).method : undefined;
+    if (threadId === undefined && (method === 'threads.fork' || method === 'threads.forkInfo')) throw new ConvexError({ kind: 'badArgs', message: 'a fork call needs a thread' });
     const runner = await ctx.db.query('runners').withIndex('by_runnerId', (q) => q.eq('runnerId', runnerId)).unique();
     if (!runner) throw new ConvexError({ kind: 'notFound', message: 'no such runner' });
     if (threadId !== undefined) {

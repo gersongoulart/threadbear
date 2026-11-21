@@ -1213,6 +1213,23 @@ export class Relay {
   async call(threadId: string, method: string, p: Record<string, unknown>): Promise<unknown> {
     const w = this.watch(threadId);
     switch (method) {
+      case 'threads.forkInfo':
+      case 'threads.fork': {
+        this.needsBackend(w, p.throughTurnId === undefined ? 80 : 81, 'Forking a conversation');
+        const params = { ...(method === 'threads.fork' ? { workspace: p.workspace, requestId: p.requestId } : {}), ...(p.throughTurnId === undefined ? {} : { throughTurnId: p.throughTurnId }) };
+        const done = await this.command(w.runnerId, threadId, 'call', { method, params }, { done: true, ms: 120_000 });
+        const result = done.result;
+        if (method === 'threads.fork' && result && typeof result === 'object') {
+          const thread = (result as { thread?: Record<string, unknown> }).thread;
+          if (thread && typeof thread.id === 'string') {
+            const existing = this.deps.remote().threads.find((t) => t.threadId === thread.id);
+            if (thread.id === threadId || (existing && existing.runnerId !== w.runnerId)) throw new RpcError(ErrorCode.other, 'The other runner did not return an independent fork of its own.');
+            const runner = this.deps.remote().runners.find((r) => r.id === w.runnerId);
+            return { ...result, thread: { ...thread, runnerId: w.runnerId, runnerName: runner?.name ?? w.runnerId } };
+          }
+        }
+        return result;
+      }
       case 'threads.events':
         return this.page(w, { afterSeq: num(p.afterSeq), beforeSeq: num(p.beforeSeq), limit: num(p.limit) });
       case 'threads.subscribe': {

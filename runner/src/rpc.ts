@@ -77,6 +77,8 @@ export const THREAD_METHODS = new Set([
   'buttons.press',
   'threads.send',
   'threads.edit',
+  'threads.forkInfo',
+  'threads.fork',
   'threads.interrupt',
   'threads.update',
   'threads.delete',
@@ -592,6 +594,10 @@ export class RpcServer {
       if (this.opts.relay?.owns(tid)) {
         return this.opts.relay.call(tid, method, p).then((res) => {
           if (method === 'threads.subscribe') conn.subs.add(tid);
+          if (method === 'threads.fork') {
+            const id = (res as { thread?: { id?: unknown } } | undefined)?.thread?.id;
+            if (typeof id !== 'string' || id === tid || r.has(id)) throw new RpcError(ErrorCode.other, 'The other runner did not return a new thread of its own.');
+          }
           return res;
         });
       }
@@ -700,6 +706,12 @@ export class RpcServer {
         return r.send(reqString(p, 'threadId'), optString(p, 'text') ?? '', optImages(p) ?? [], { ...optAnswers(p), ...optPhoneOrigin(p) });
       case 'threads.edit':
         return r.editMessage(reqString(p, 'threadId'), reqNumber(p, 'seq'), optString(p, 'text') ?? '', optImages(p) ?? [], { stopBackground: p.stopBackground === true });
+      case 'threads.forkInfo':
+        return r.forkInfo(reqString(p, 'threadId'), p.throughTurnId === undefined ? undefined : reqString(p, 'throughTurnId'));
+      case 'threads.fork': {
+        if (p.workspace !== 'same' && p.workspace !== 'worktree') throw bad('workspace must be same or worktree');
+        return r.forkThread(reqString(p, 'threadId'), { workspace: p.workspace, requestId: reqString(p, 'requestId'), ...(p.throughTurnId === undefined ? {} : { throughTurnId: reqString(p, 'throughTurnId') }) });
+      }
       case 'threads.interrupt':
         // Sent on for an agent's interrupt_thread (handover.ts), it isn't his Stop.
         return r.interrupt(reqString(p, 'threadId'), { byMike: p.byAgent !== true });

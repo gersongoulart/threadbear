@@ -567,6 +567,8 @@ async function main(): Promise<void> {
     // on whichever runner has the thread.
     commands: {
       ...phoneCommands(runner, peers),
+      forkInfo: (id) => runner.forkInfo(id),
+      forkThread: (id, options) => runner.forkThread(id, options),
       // A schedule's own runner gets its command, so the scheduler here is its.
       schedule: ({ scheduleId, action }) => (action === 'run' ? scheduler.runNow(scheduleId) : scheduler.update({ scheduleId, paused: action === 'pause' })),
       // The Mac's Move sheet asking, through the relay (threads.movePreview).

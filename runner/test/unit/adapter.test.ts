@@ -811,3 +811,24 @@ test('Stop hook: a notice handed over with "Now write your reply" does not undo 
   assert.equal((await stop({ hook_event_name: 'Stop', stop_hook_active: false })).reason, ONE_REPLY_END_TURN_NUDGE);
   state.close!();
 });
+
+test('a resumed Claude fork rebuilds MCP routing, environment and instructions for the child', () => {
+  const routed: string[] = [];
+  const childServer = { type: 'sdk', name: 'threadbear-child' };
+  const { state } = start([], {
+    threadId: 'fork-child',
+    resume: true,
+    sessionId: '00000000-0000-0000-0000-000000000002',
+    env: { THREADBEAR_THREAD_ID: 'fork-child', THREADBEAR_THREAD_KEY: 'child-key' },
+    instructions: 'You belong to the fork child project.',
+  }, {
+    mcpServersFor: (id: string) => { routed.push(id); return { threadbear: childServer }; },
+  });
+  assert.deepEqual(routed, ['fork-child']);
+  assert.equal(state.options.mcpServers.threadbear, childServer);
+  assert.equal(state.options.env.THREADBEAR_THREAD_ID, 'fork-child');
+  assert.equal(state.options.env.THREADBEAR_THREAD_KEY, 'child-key');
+  assert.equal(state.options.resume, '00000000-0000-0000-0000-000000000002');
+  assert.match(state.options.systemPrompt.append, /fork child project/);
+  state.close!();
+});

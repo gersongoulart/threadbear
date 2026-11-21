@@ -7461,6 +7461,7 @@ dependencies = [
  "tokio",
  "unicode-properties",
  "ureq",
+ "uuid",
 ]
 
 [[package]]

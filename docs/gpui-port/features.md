@@ -143,6 +143,8 @@ It comes from reading code, not from running anything, so "(unverified)" means n
 | `thread.loading` | Reading a thread | A small spinner in the middle of the transcript, no words, until its rows are read | Kit spinner over the list while the pane isn't loaded. | build | S | `DetailView` |
 | `thread.kept` | Threads kept loaded | The last 24 threads opened stay loaded, so switching back shows one at once and catches up from its last seq | `PaneCache` of panes, still subscribed; least recently shown goes first. | build | M | `AppModel+Selection` (`sessions`, `maxSessions`) |
 
+| `threads.fork` | Conversation forks | Copy an idle Claude or Codex conversation, choosing shared files or a separate worktree; show progress and errors, then open the idle child. | Existing-style GPUI chooser, native provider session copy and runner relay; experiment conversationForks. | build | M | none |
+
 ## 5. Transcript row kinds
 
 | ID | Feature | What it does | How in GPUI | Route | Size | Swift |

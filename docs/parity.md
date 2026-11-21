@@ -23,6 +23,8 @@ and web" is the iPhone app and the website, which read every thread through Conv
 | Pressing a reply button | `buttons.press` | Yes | Yes |
 | A message's reply buttons | `buttons.list` | Yes | Yes |
 | The slash command list | `threads.commands` | Yes | Yes |
+| Checking conversation fork choices | `threads.forkInfo` | Yes | No: The first version creates forks from the desktop only. |
+| Forking a conversation | `threads.fork` | Yes | No: The phone and website read forked history but do not yet create forks. |
 | Hibernate until something happens | `threads.hibernateWhen` | Yes | No: The phone hibernates until a time only. |
 | What fills its context | `threads.contextUsage` | No: Asked of the CLI on that Mac; the ring's popover there shows the totals only. | No: Not on the phone. |
 | Ticking an ask on the card | `threads.tickAsk` | No: Ticks stay on that Mac. | No: The phone sends picks with its answer instead. |

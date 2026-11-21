@@ -272,7 +272,7 @@ fn row_ids_for(event: &super::event::Event, plan_rows: &mut std::collections::Ha
         }
         P::TurnStarted { .. } => vec![format!("w:{}", event.turn_id.as_deref().unwrap_or(""))],
         P::TurnCompleted(done) => vec![format!("f:{}", if done.turn_id.is_empty() { event.turn_id.clone().unwrap_or_else(|| format!("seq{seq}")) } else { done.turn_id.clone() })],
-        P::SystemNote(_) => vec![format!("n:{seq}")],
+        P::SystemNote { .. } => vec![format!("n:{seq}")],
         P::ThreadRewound(_) => vec![format!("rw:{seq}")],
         P::Error(_) => vec![format!("e:{seq}")],
         P::ActionRun(_) => vec![format!("t:{}", ActionRun::item_id(seq))],

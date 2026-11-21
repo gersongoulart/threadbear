@@ -532,6 +532,19 @@ impl Composer {
     /// if the runner doesn't take it.
     pub(crate) fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.loading_pictures(cx) { return; }
+        // This is a desktop operation, before a turn or draft clearing.
+        let command = self.input.read(cx).value().trim().to_owned();
+        if command.eq_ignore_ascii_case("/fork") && self.editing.is_none() {
+            if let (Some(id), Some(app)) = (self.thread_id.clone(), self.app.upgrade()) {
+                self.palette.closed_at = Some(self.input.read(cx).value().to_string());
+                app.update(cx, |app, cx| app.open_fork(id, window, cx));
+                cx.notify();
+            } else if let Some(app) = self.app.upgrade() {
+                app.update(cx, |app, cx| app.show_error("Open a saved conversation before forking it.".into(), cx));
+            }
+            return;
+        }
+
         // The arrow hops as Return lands, when there's something to send
         // (Mike picked it, 13 Nov). None under Reduce Motion.
         if self.can_send(cx) && !cx.reduce_motion() {

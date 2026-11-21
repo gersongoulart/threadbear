@@ -14,7 +14,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { ThreadState } from '../runner.ts';
 
+const workspaceCleanups = new WeakMap<Runner, Map<string, Promise<void>>>();
+
+function activeSharers(runner: Runner, st: ThreadState): ThreadState[] {
+  const w = st.rec.worktree;
+  if (!w) return [];
+  return [...runner.threads.values()].filter((other) => other !== st && !other.rt.deleted && !other.rec.archivedAt && other.rec.worktree?.path === w.path && !other.rec.worktree.removedAt);
+}
+
 export const worktreesPart = {
+  worktreeCleanup(this: Runner, st: ThreadState): Promise<void> | undefined {
+    const w = st.rec.worktree;
+    return w ? workspaceCleanups.get(this)?.get(w.path) : undefined;
+  },
   // ------------------------------------------------------------ worktrees
   // A worktree per thread (docs/thread-worktrees.md, worktrees.ts).
 
@@ -346,7 +358,7 @@ export const worktreesPart = {
   // The Land chip, for a thread with a worktree of its own.
   worktreeAction(this: Runner, rec: ThreadRecord): Action | undefined {
     const w = rec.worktree;
-    if (!w || w.removedAt) return undefined;
+    if (!w || w.removedAt || w.shared) return undefined;
     // This runner's own tb, in full: a login shell's PATH may not have it.
     const tb = path.join(BIN_DIR, 'tb');
     const quoted = /^[\w./-]+$/.test(tb) ? tb : `'${tb.replace(/'/g, `'\\''`)}'`;
@@ -407,11 +419,46 @@ export const worktreesPart = {
   // When the thread is archived or deleted: its worktree and branch go if
   // everything on them is on main; otherwise they stay, and the thread (or,
   // once it's deleted, a notice) says so and how to land or drop them.
-  async cleanUpWorktree(this: Runner, st: ThreadState, deleted = false): Promise<void> {
+  async cleanUpWorktree(this: Runner, st: ThreadState, deleted = false, after?: Promise<unknown>): Promise<void> {
+    const w = st.rec.worktree;
+    if (!w || w.removedAt) return;
+    let pending = workspaceCleanups.get(this);
+    if (!pending) workspaceCleanups.set(this, pending = new Map());
+    const existing = pending.get(w.path);
+    if (existing && !deleted) return existing;
+    const cleaning = (async () => {
+      // An archive stops acting once deleted. Its deletion cleanup must
+      // follow it, rather than being deduplicated onto that stopped job.
+      if (existing) await existing.catch(() => undefined);
+      await after;
+      await this.cleanUpWorktreeNow(st, deleted);
+    })();
+    const tracked = cleaning.finally(() => {
+      if (pending.get(w.path) === tracked) {
+        pending.delete(w.path);
+        if (!pending.size) workspaceCleanups.delete(this);
+      }
+      if (this.draining) this.queueHandoverCheck();
+    });
+    pending.set(w.path, tracked);
+    return tracked;
+  },
+
+  async cleanUpWorktreeNow(this: Runner, st: ThreadState, deleted = false): Promise<void> {
     const { rec } = st;
     const w = rec.worktree;
     if (!w || w.removedAt) return;
-    const stillOurs = () => deleted || !st.rt.deleted;
+    const borrowers = activeSharers(this, st);
+    if (borrowers.length) {
+      // Do not tear down servers, clear caches or pool a folder while a
+      // same-folder fork still uses it. Each borrower keeps the workspace
+      // metadata so the last one archived can perform the normal cleanup.
+      w.cleanupOwed = true;
+      if (!deleted) this.markDirty(st);
+      else this.notice('info', `Kept ${w.path}: another conversation still shares its files.`);
+      return;
+    }
+    const stillOurs = () => (deleted || !st.rt.deleted) && activeSharers(this, st).length === 0;
     try {
       await this.tearDownWorktree(st, deleted, stillOurs);
     } catch (e) {
@@ -423,12 +470,38 @@ export const worktreesPart = {
     } catch (e) {
       result = { removed: false as const, reason: String((e as Error).message ?? e) };
     }
+    const related = [...this.threads.values()].filter((other) => other.rec.worktree?.path === w.path && other.rec.worktree.branch === w.branch);
+    if (!result.removed && (w.shared || related.some((other) => other.rec.worktree?.shared)) && !worktreeFolderNow(w)) {
+      // A borrower may wake after git removal/detachment was dispatched.
+      // It waited for this job, but must not resume in that missing or
+      // released folder just because a later liveness check stopped cleanup.
+      w.removedAt = this.isoNow();
+      if (fs.existsSync(w.path)) w.spare = true;
+      for (const other of related) {
+        const borrowed = other.rec.worktree!;
+        borrowed.removedAt = w.removedAt;
+        if (w.spare) borrowed.spare = true;
+        delete borrowed.cleanupOwed;
+        this.markDirty(other);
+      }
+      if (!st.rt.deleted) this.emit(st, { type: 'system.note', text: 'The shared checkout was removed or released during cleanup. Threads using it will resume in the main checkout.' });
+      return;
+    }
     this.log.info('worktree cleanup', { threadId: rec.id, path: w.path, ...result });
     // Deleted meanwhile: nothing to record it in, and emit would throw.
     if (st.rt.deleted && !deleted) return;
     delete w.cleanupOwed;
     if (result.removed) {
       w.removedAt = this.isoNow();
+      for (const other of this.threads.values()) {
+        const shared = other.rec.worktree;
+        if (other !== st && shared?.path === w.path && shared.branch === w.branch) {
+          shared.removedAt = w.removedAt;
+          if (result.spare || result.taken) shared.spare = true;
+          delete shared.cleanupOwed;
+          this.markDirty(other);
+        }
+      }
       // A folder that's another checkout's now counts as a spare: the
       // thread, brought back, never carries on in it (leavesRemovedWorktree).
       if (result.spare || result.taken) w.spare = true;

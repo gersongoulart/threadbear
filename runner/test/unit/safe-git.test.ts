@@ -214,11 +214,19 @@ test('untrustedGit runs no diff.external, and only the commands it has been look
   const plain = await untrustedGit(repo, ['diff', 'HEAD'], quiet);
   assert.ok(plain.ok && plain.stdout.includes('+b'), 'a plain diff is git\'s own');
   assert.equal(fs.existsSync(marker), false, 'diff');
-  for (const args of [['log', '-p'], ['show', 'HEAD'], ['merge', 'HEAD'], ['stash'], ['worktree', 'add', path.join(root, 'w')], ['submodule', 'status'], []]) {
+  for (const args of [['log', '-p'], ['show', 'HEAD'], ['merge', 'HEAD'], ['stash'], ['worktree', 'move', path.join(root, 'w')], ['submodule', 'status'], []]) {
     const out = await untrustedGit(repo, args, quiet);
     assert.equal(out.ok, false, `git ${args.join(' ')} is refused`);
   }
   assert.ok((await untrustedGit(repo, ['worktree', 'list', '--porcelain'], quiet)).ok);
+  const hooks = path.join(root, 'hooks');
+  fs.mkdirSync(hooks);
+  fs.copyFileSync(payload, path.join(hooks, 'post-checkout'));
+  g('config', 'core.hooksPath', hooks);
+  const destination = path.join(root, 'safe-worktree');
+  assert.ok((await untrustedGit(repo, ['worktree', 'add', '--detach', destination, 'HEAD'], quiet)).ok);
+  assert.equal(fs.existsSync(marker), false, 'worktree checkout does not execute a repo hook');
+  assert.ok((await untrustedGit(repo, ['worktree', 'remove', destination], quiet)).ok);
   assert.equal(fs.existsSync(marker), false);
   assert.throws(() => untrustedGitSync(repo, ['diff']), /listings/);
 });

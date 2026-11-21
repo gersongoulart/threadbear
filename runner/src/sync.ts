@@ -140,7 +140,7 @@ export type SyncConfig = {
 // lower one means its backend hasn't been deployed since this runner was:
 // said in runner.status, tb status and the log rather than stopping, since
 // the runner only adds to what it sends while the number stays the same.
-export const BACKEND_API_VERSION = 79;
+export const BACKEND_API_VERSION = 81;
 // From this one a message row can be a login's note (role "note"): a thread
 // that moved to another login or is waiting for room says so on another Mac.
 export const LOGIN_NOTES_API_VERSION = 78;
@@ -612,6 +612,8 @@ export type CommandHost = {
   pressButton?: (threadId: string, buttonId: string) => unknown;
   // The phone's slash command palette (API 62): threads.commands.
   threadCommands?: (threadId: string) => unknown;
+  forkInfo?: (threadId: string) => Promise<import('./runner/forks.ts').ForkInfo>;
+  forkThread?: (threadId: string, options: import('./runner/forks.ts').ForkOptions) => Promise<{ thread: ThreadSummary }>;
   // The Mac's Move sheet (`moves.describe` and `moves.preview` calls).
   moveDescribe?: (threadId: string) => Promise<MoveInfo>;
   movePreview?: (p: { info: MoveInfo; cwd?: string; accountId?: string }) => Promise<MovePreview>;
@@ -1088,7 +1090,7 @@ export function toMessageDoc(threadId: string, e: PersistedEvent, scrub: (text: 
   // The runner's own words, a line or two: a move to another provider
   // also says which model takes over.
   if (e.type === 'system.note') {
-    const text = e.login || e.savedMessage ? scrub(e.text).trim().slice(0, NOTE_CHARS) : '';
+    const text = e.login || e.savedMessage || e.fork ? scrub(e.text).trim().slice(0, NOTE_CHARS) : '';
     return text ? { threadId, seq: e.seq, role: 'note', text, ...turn, at: e.ts } : undefined;
   }
   if (e.type === 'plan.proposed') {
@@ -4517,6 +4519,18 @@ export class ConvexSync {
         // isn't trusted to have checked, and nothing here may answer with
         // file contents or tool output (step 4 brings those, scrubbed).
         const params = a.params && typeof a.params === 'object' ? (a.params as Record<string, unknown>) : {};
+        if (a.method === 'threads.forkInfo') {
+          if (!host.forkInfo) throw new Error('This runner does not support conversation forks.');
+          return { result: await host.forkInfo(needThread()) };
+        }
+        if (a.method === 'threads.fork') {
+          if (!host.forkThread) throw new Error('This runner does not support conversation forks.');
+          if (params.workspace !== 'same' && params.workspace !== 'worktree') throw new Error('workspace must be same or worktree');
+          if (typeof params.requestId !== 'string') throw new Error('requestId must be a UUID');
+          const result = await host.forkThread(needThread(), { workspace: params.workspace, requestId: params.requestId });
+          await this.writeRowNow(result.thread.id);
+          return { result };
+        }
         // The Mac's Move sheet (threads.movePreview): this runner's thread
         // described, or, as the target, where it would go. Both only plan.
         if (a.method === 'moves.describe') {

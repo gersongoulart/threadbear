@@ -159,6 +159,7 @@ import { contextUsagePart, type ContextUsageAnswer, type ContextUsagePart } from
 import type { SlashCommand } from './slash-commands.ts';
 import { hibernationPart, leastAuthority, type HibernationPart } from './runner/hibernation.ts';
 import { newThreadsPart, type NewThreadsPart } from './runner/new-threads.ts';
+import { forkIdentityText, forksPart, type ForksPart } from './runner/forks.ts';
 import { LAB_REVIEW_ROUNDS, applyAnswers, fixedSinceLastRound, labReviewPart, ledgerCard, openFindings, parseVerdict, type LabReviewPart } from './runner/lab-review.ts';
 import { looseEndsPart, type LooseEndsPart } from './runner/loose-ends.ts';
 import { quietInboxPart, type QuietInboxPart } from './runner/quiet-inbox.ts';
@@ -394,6 +395,8 @@ export type Turn = {
 };
 
 type Runtime = {
+  forking?: boolean;
+  forkIdentityTold?: boolean;
   // On its way to another runner (runner/moves.ts): no turn starts.
   moving?: ThreadMoving;
   session?: AgentSession;
@@ -680,7 +683,7 @@ export const UNTIL_RESTART = '9999-12-31T00:00:00.000Z';
 export const NO_WAKE_TIME = UNTIL_RESTART;
 
 // Parts of the Runner that live in runner/ (see each file's top).
-export interface Runner extends LooseEndsPart, QuietInboxPart, LabReviewPart, NewThreadsPart, HibernationPart, TitlesPart, HighlightsPart, PatchesPart, EditingPart, ClisPart, ReviewsPart, ButtonsPart, ApprovalsPart, ProjectsHostPart, StoppedWorkPart, HandoversPart, PoolsPart, NetworkPart, WorktreesPart, CommandsPart, ContextUsagePart, MovesPart {}
+export interface Runner extends LooseEndsPart, QuietInboxPart, LabReviewPart, ForksPart, NewThreadsPart, HibernationPart, TitlesPart, HighlightsPart, PatchesPart, EditingPart, ClisPart, ReviewsPart, ButtonsPart, ApprovalsPart, ProjectsHostPart, StoppedWorkPart, HandoversPart, PoolsPart, NetworkPart, WorktreesPart, CommandsPart, ContextUsagePart, MovesPart {}
 export class Runner {
   // While main.ts is still starting up: waking a thread for its waits
   // (reconcileWaits) would start a CLI whose tools aren't ready, so they
@@ -1609,6 +1612,7 @@ export class Runner {
 
   sendTo(st: ThreadState, text: string, images: ImageRef[], opts: SendOptions = {}): string {
     const { rec, rt } = st;
+    if (rt.forking) throw new RpcError(ErrorCode.busy, 'This conversation is being forked. Send again in a moment.');
     if (opts.answers?.length && fromMike(text, opts) && this.answered) {
       const open = rec.needs?.needs === 'you' && rec.needs.seq === rec.lastTurnCompletedSeq ? rec.needs.asks : undefined;
       try {
@@ -1898,6 +1902,7 @@ export class Runner {
     // depends on whether it removed the folder (leaveRemovedWorktree), and
     // a CLI started there meanwhile would have the folder taken from under it.
     while (rt.cleaning) await rt.cleaning;
+    while (this.worktreeCleanup(st)) await this.worktreeCleanup(st);
     // Deleted (which leaves rt.turn as it was) or interrupted meanwhile.
     const gone = () => rt.deleted || rt.turn?.turnId !== msg.turnId;
     if (gone()) return; // interrupted while waiting
@@ -2058,6 +2063,7 @@ export class Runner {
 
   startSession(st: ThreadState, account: Account): void {
     const { rec, rt } = st;
+    rt.forkIdentityTold = false;
     const adapter = this.adapters[rec.provider];
     if (!adapter) throw new Error(`This runner can't run ${providerName(rec.provider)} threads.`);
     // Checked here, where every way a thread runs (a send, a carry-on, a
@@ -2578,6 +2584,7 @@ export class Runner {
       durationMs: Math.max(0, this.clock.now() - turn.startedAt),
     };
     if (turnCost !== undefined) body.costUsd = turnCost;
+    if (r.totalCostUsd !== undefined) body.sessionCostTotal = r.totalCostUsd;
     if (r.usage) body.usage = r.usage;
     if (outcome === 'failed' && r.error) body.error = r.error;
     // Why it failed (a limit, a full context, the login), so the app can
@@ -3059,6 +3066,7 @@ export class Runner {
   }): { thread: ThreadSummary } {
     const st = this.mustGet(params.threadId);
     const { rec, rt } = st;
+    if (rt.forking) throw new RpcError(ErrorCode.busy, 'This conversation is being forked. Try again in a moment.');
     // Checked before anything changes, so a refused rename changes nothing else either.
     if (params.title !== undefined && params.titleBy === 'agent' && rec.titleByMike && params.title.trim() !== rec.title) {
       throw new RpcError(ErrorCode.badParams, `The user named this thread "${rec.title}" themselves, so it keeps that title. Only rename it if they ask you to.`);
@@ -3385,6 +3393,7 @@ export class Runner {
   delete(threadId: string): Record<string, never> {
     const st = this.mustGet(threadId);
     const { rec, rt } = st;
+    if (rt.forking) throw new RpcError(ErrorCode.busy, 'This conversation is being forked. Try again in a moment.');
     rt.deleted = true;
     rt.trashed = true;
     this.threads.delete(threadId);
@@ -3412,10 +3421,7 @@ export class Runner {
     // One still being made and set up is cleaned up by prepareWorktree.
     if (rec.worktree && !rec.worktree.removedAt && !rt.preparing) {
       const cleaning = rt.cleaning;
-      void Promise.resolve(ended ?? rt.closing)
-        .catch(() => undefined)
-        .then(() => cleaning)
-        .then(() => this.cleanUpWorktree(st, true))
+      void this.cleanUpWorktree(st, true, Promise.resolve(ended ?? rt.closing).catch(() => undefined).then(() => cleaning))
         .catch((e: unknown) => this.log.error('worktree cleanup failed', { threadId, error: String(e) }));
     }
     this.store.trash(threadId, this.clock.now());
@@ -4092,7 +4098,8 @@ export class Runner {
     const standing = this.instructionsNews(rec);
     const presses = structuredClone(rec.presses);
     const pressed = this.takePressNews(st);
-    const lead = [standing, pressed].filter(Boolean).join('\n\n');
+    const fork = rt.forkIdentityTold ? undefined : forkIdentityText(rec);
+    const lead = [fork, standing, pressed].filter(Boolean).join('\n\n');
     try {
       rt.session!.send(lead ? { ...message, text: `${lead}\n\n${message.text}` } : message);
     } catch (e) {
@@ -4101,6 +4108,7 @@ export class Runner {
       rec.presses = presses;
       throw e;
     }
+    if (fork) rt.forkIdentityTold = true;
     if (!standing) return;
     // A turn that ends any other way may have dropped it (a message Codex was
     // still holding when Stop came), so the turn's end looks at this.
@@ -4117,6 +4125,7 @@ export class Runner {
   // arrived, so the next message says what's current.
   settleInstructionsNews(st: ThreadState, completed: boolean): void {
     const { rec, rt } = st;
+    if (!completed) rt.forkIdentityTold = false;
     this.settlePresses(rec, completed);
     if (rt.instructionsNewsSent && !completed && rec.instructionsTold !== undefined) rec.instructionsTold = INSTRUCTIONS_REWOUND;
     rt.instructionsNewsSent = false;
@@ -4213,7 +4222,7 @@ export class Runner {
 
 // The Runner's other methods live in parts under runner/, one area each;
 // they go onto its prototype here, as the class's own methods would be.
-for (const part of [looseEndsPart, quietInboxPart, labReviewPart, newThreadsPart, hibernationPart, titlesPart, highlightsPart, patchesPart, editingPart, clisPart, reviewsPart, buttonsPart, approvalsPart, projectsHostPart, stoppedWorkPart, handoversPart, poolsPart, networkPart, worktreesPart, commandsPart, contextUsagePart, movesPart]) {
+for (const part of [looseEndsPart, quietInboxPart, labReviewPart, forksPart, newThreadsPart, hibernationPart, titlesPart, highlightsPart, patchesPart, editingPart, clisPart, reviewsPart, buttonsPart, approvalsPart, projectsHostPart, stoppedWorkPart, handoversPart, poolsPart, networkPart, worktreesPart, commandsPart, contextUsagePart, movesPart]) {
   for (const [key, d] of Object.entries(Object.getOwnPropertyDescriptors(part))) {
     Object.defineProperty(Runner.prototype, key, { ...d, enumerable: false });
   }

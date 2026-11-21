@@ -192,7 +192,7 @@ export async function untrustedGit(dir: string, args: readonly string[], opts: U
   // run: a new one is added here once it has been (Muse's review, 11 Nov
   // 2026: log, show, merge, stash and the like reach submodules or diff
   // programs these settings don't cover).
-  if (!sub || !SUBCOMMANDS.has(sub) || (sub === 'worktree' && rest[0] !== 'list')) return { ok: false, code: 1, stdout: '', stderr: `untrustedGit doesn't run git ${[sub, sub === 'worktree' ? rest[0] : undefined].filter(Boolean).join(' ')}: nobody has looked at what a repo's config could make it run.` };
+  if (!sub || !SUBCOMMANDS.has(sub) || (sub === 'worktree' && !['list', 'add', 'remove'].includes(rest[0] ?? ''))) return { ok: false, code: 1, stdout: '', stderr: `untrustedGit doesn't run git ${[sub, sub === 'worktree' ? rest[0] : undefined].filter(Boolean).join(' ')}: nobody has looked at what a repo's config could make it run.` };
   // The same variables as the command, so it reads the config the command will.
   const listed = await execGit(dir, [...LISTING_GIT_CONFIG, '-C', dir, 'config', '--list', '--show-scope', '-z'], { ...untrustedGitEnv(), GIT_NO_LAZY_FETCH: '1', ...opts.env }, 10_000);
   // Outside a repo it still lists the owner's own config (empty is 0 too);
@@ -211,7 +211,10 @@ export async function untrustedGit(dir: string, args: readonly string[], opts: U
 
 // What untrustedGit runs. `git submodule` isn't one: it runs git in each
 // submodule with that submodule's own config.
-const SUBCOMMANDS = new Set(['add', 'branch', 'bundle', 'cat-file', 'clone', 'commit-tree', 'diff', 'diff-files', 'diff-index', 'fetch', 'for-each-ref', 'ls-files', 'ls-remote', 'merge-base', 'read-tree', 'remote', 'reset', 'rev-list', 'rev-parse', 'status', 'symbolic-ref', 'update-ref', 'worktree', 'write-tree']);
+// Fork workspaces use worktree add/remove and apply without --index. The
+// same filters, hooks, submodule and transport protections cover checkout;
+// apply only writes working files in the newly allocated destination.
+const SUBCOMMANDS = new Set(['add', 'apply', 'branch', 'bundle', 'cat-file', 'clone', 'commit-tree', 'diff', 'diff-files', 'diff-index', 'fetch', 'for-each-ref', 'ls-files', 'ls-remote', 'merge-base', 'read-tree', 'remote', 'reset', 'rev-list', 'rev-parse', 'status', 'symbolic-ref', 'update-ref', 'worktree', 'write-tree']);
 
 // A submodule is a repo of its own, with its own config (.git/modules/<name>/
 // config, or a .git inside it), and the settings above only switch off what

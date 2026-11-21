@@ -251,6 +251,12 @@ impl Composer {
             let t = app.read(cx);
             (t.slash.commands.get(&key).cloned().unwrap_or_default(), !t.slash.commands.contains_key(&key), t.new_thread.prefs.recent_slash.clone())
         });
+        if self.thread_id.is_some() && app.as_ref().is_some_and(|a| a.read(cx).conversation_forks_enabled()) {
+            all.retain(|c| c.name != "fork");
+            all.insert(0, slash::SlashCommand { name: "fork".into(), description: Some("Copy this conversation and choose its folder".into()), source: "threadbear".into(), user_only: Some(true), ..Default::default() });
+        } else {
+            all.retain(|c| c.name != "fork");
+        }
         let mid_message = typed.mid_message();
         if mid_message {
             all = slash::mid_message(&all);

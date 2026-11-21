@@ -65,6 +65,7 @@ mod librarian;
 mod mac_switch;
 mod media_view;
 mod move_sheet;
+mod fork_sheet;
 mod new_thread;
 mod notify;
 mod open_anything;

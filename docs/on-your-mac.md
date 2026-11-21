@@ -6,6 +6,19 @@ check the code against it before running anything. If the code does
 something that isn't on this list, treat that as a problem and say so.
 File references are where to look.
 
+## Conversation forks
+
+The off-by-default Conversation forks experiment copies native Claude or
+Codex session history into a new session under the same account's existing
+configuration folder, and copies attachments and tool-output blobs into the
+new thread's data folder. A separate-worktree fork creates a Git worktree
+under `<repository>-threads/fork-<thread-id>`, from the source revision,
+and applies its tracked edits without staging or changing the source index.
+Its trusted setup hook follows the existing worktree rules. Untracked and
+ignored files stay in the source. Forking itself makes no model request.
+Another runner's fork request passes through the existing Convex relay to
+its owner. The feature adds no daemon, network destination or periodic poll.
+
 ## What setup and install add
 
 - **Git remotes** (`scripts/setup.mjs`, "Your copy"): Mike's repo becomes

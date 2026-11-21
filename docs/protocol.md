@@ -1063,7 +1063,7 @@ Persisted event types (stored in `events.ndjson`, returned by `threads.events`):
 | `plan.proposed` | `itemId`, `text` (Markdown): a "Plan first" plan waiting for Mike (see "Plan first") |
 | `plan.resolved` | `itemId`, `decision` (`go` \| `revise`): it was approved, or sent back for another go |
 | `turn.started` | `turnId`, `wokeBy?: {kind, description}[]`. A turn the agent starts by itself (a background task finished) has no `user.message` before it. `wokeBy` is on such a turn when background work finishing started it: each task that had finished since the last turn, `kind` as in `BackgroundTask` (`agent` \| `shell` \| `monitor` \| `other`), its `description` possibly empty. Clients mark the time between that turn and the one before it in the transcript (a "6 min later" divider, Mike 3 Nov). A `user.message` after `turn.started` was sent while the turn ran and went into it |
-| `turn.completed` | `turnId`, `outcome` (`completed` \| `interrupted` \| `failed`), `durationMs`, `costUsd?` (Codex turns have none), `usage?` (Claude: `{inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens}`; Codex: `{inputTokens, cachedInputTokens, cacheWriteTokens?, outputTokens, reasoningTokens}`), `error?`, `errorKind?` (`usageLimit` \| `contextWindow` \| `auth` \| `network`, when a failed turn's cause is known, so a client can offer the fix without reading `error`), `needs?` (`you` \| `nothing`), `asks?: Ask[]`, `next?: string[]` (with `nothing`: suggested follow-ups), `needsFrom?` (`tool` \| `text`): what a completed turn said it needs from Mike (Needs you), `review?: LabReviewLedger` (on the turn that answered a review by another lab's findings: see that) |
+| `turn.completed` | `turnId`, `outcome` (`completed` \| `interrupted` \| `failed`), `durationMs`, `costUsd?` (Codex turns have none), `sessionCostTotal?` (native cumulative baseline kept for nested historical forks; never billed again), `usage?` (Claude: `{inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens}`; Codex: `{inputTokens, cachedInputTokens, cacheWriteTokens?, outputTokens, reasoningTokens}`), `error?`, `errorKind?` (`usageLimit` \| `contextWindow` \| `auth` \| `network`, when a failed turn's cause is known, so a client can offer the fix without reading `error`), `needs?` (`you` \| `nothing`), `asks?: Ask[]`, `next?: string[]` (with `nothing`: suggested follow-ups), `needsFrom?` (`tool` \| `text`): what a completed turn said it needs from Mike (Needs you), `review?: LabReviewLedger` (on the turn that answered a review by another lab's findings: see that) |
 | `asks.ticked` | `asksSeq`, `ticked: number[]` (indexes into that turn's `asks`, the whole set now ticked). Outside any turn. The latest one for an `asksSeq` is that card's ticks |
 | `system.note` | `text` (e.g. "Resumed session", "Compacted the conversation", "Patch reseed added: action Reseed dev DB."), `wake?: true` on a background task's notification that went into the running turn, which the agent reads at its next step (see "Once a turn, or once a message"), `login?: true` on a note about the thread's login running out: its move to another one, its wait for room, or that wait being called off (Pools, "Moves in the transcript"), `savedMessage?: true` when an early Stop saved a message for the next send. Login and saved-message notes go up to the backend (Sync, "Messages"), so other Macs, the phone and the website show them |
 | `error` | `message` |
@@ -2564,6 +2564,55 @@ shows the totals only.
 Both sides ignore fields they don't know; the app leaves out a row whose
 `kind` it doesn't know, and draws a row whose `id` it doesn't know in grey
 after the ones it does.
+
+## Forking a conversation
+
+The `conversationForks` experiment enables native conversation copies for
+Claude and Codex. `threads.forkInfo { threadId }` returns `{ available,
+reason?, workspace?: { root, head, untracked: string[] } }`. Available means
+the source is idle, has a saved native session, and has no queued messages,
+pending approvals, background work, edit or move. Workspace information is
+absent outside Git. The client shows the destination choice before creating.
+
+`threads.fork { threadId, workspace: "same" | "worktree", requestId, throughTurnId?: string }`
+returns `{ thread: ThreadSummary }`. `requestId` is a client UUID: retries
+return the existing fork even after reconnect or restart. A new worktree
+starts from the source HEAD and includes tracked working-file changes;
+untracked and ignored files stay out, as the chooser says. It never falls
+back to sharing files. The source index is not changed or staged. A source
+that changes during capture causes a refusal. Same-folder forks bypass
+automatic worktree allocation. Neither option starts a model turn.
+If Same folder borrows a Threadbear-managed worktree, the child keeps a
+`worktree.shared` reference. Cleanup retains that checkout while any sharing
+thread is active, and the last archived thread performs normal cleanup.
+Borrowers have no independent Land action for the source's branch.
+
+The new native session and Threadbear thread IDs differ from the source.
+Model, effort, account/pool preference, access, confinement and projects
+carry over. Native tools and environment bind to the destination. Normalized
+history, media and blobs are independent copies, with a source-link note;
+historical controls never become current approvals, cards or actions.
+Copied usage does not count as new spend. Missing native history and
+unsupported providers cause an error, never a summary-based substitute.
+
+The optional `throughTurnId` also applies to `threads.forkInfo`. It must identify
+a visible completed turn by its `turnId`. This stable ID is identical on
+local and relayed transcripts, whose event sequence numbers differ. The reply's footer has a small branch icon
+beside time and cost, with tooltip “Fork from here”. It opens the chooser at
+that boundary: both native context and displayed history include that turn
+and exclude later turns. Missing native boundaries are refused. Retry identity
+includes the boundary. Omitted boundaries retain latest-conversation behavior.
+Workspace choices still copy current tracked edits, without rewinding code.
+Completed events keep an optional native cumulative cost snapshot for nested
+forks. Older replies whose baseline cannot be reconstructed reliably are
+refused rather than recharging copied spend.
+
+The GPUI thread menu and `/fork` open the same chooser. Backend API 81 adds
+the validated owner-key relay calls for fork creation and preview. Requests for another
+runner's thread execute on its owner through the relay. Phone and web read
+the copied history through normal mirroring; their creation controls are
+not included in this first version. Code rewind is outside this operation. Older clients ignore its new fields, and newer
+clients hide the action unless `hello.experiments` enables it.
 
 ## Editing a message
 

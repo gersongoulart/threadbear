@@ -1312,8 +1312,10 @@ impl TranscriptModel {
                 }
             }
 
-            EventPayload::SystemNote(text) => {
-                self.append(Row::new(&format!("n:{seq}"), seq, turn_id, RowContent::Note(text.clone())));
+            EventPayload::SystemNote { text, fork } => {
+                let mut row = Row::new(&format!("n:{seq}"), seq, turn_id, RowContent::Note(text.clone()));
+                row.fork_note = *fork;
+                self.append(row);
             }
 
             EventPayload::Error(message) => {
@@ -1364,6 +1366,7 @@ impl TranscriptModel {
     /// errors, footers, and cards still waiting or turned down) ends a run
     /// and is never hidden in one.
     pub(crate) fn is_work_row(row: &Row) -> bool {
+        if row.fork_note { return false; }
         match &row.content {
             RowContent::Tool(tool) => !Self::is_taken_end_turn(tool),
             RowContent::Note(_) if row.content.is_wake_note() || row.content.is_login_note() => false,
@@ -1684,7 +1687,7 @@ impl TranscriptModel {
     /// the work carried on. The note an edit of Mike's leaves stays.
     fn stays_out(&self, k: usize, replies: &HashSet<usize>) -> bool {
         let item = &self.items[k];
-        if replies.contains(&k) || item.id.starts_with("rw:") || item.content.is_wake_note() || item.content.is_login_note() {
+        if item.fork_note || replies.contains(&k) || item.id.starts_with("rw:") || item.content.is_wake_note() || item.content.is_login_note() {
             return true;
         }
         match &item.content {

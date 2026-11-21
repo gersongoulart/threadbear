@@ -18,6 +18,7 @@ name = "threadbear-web-helper"
 path = "src/web_helper.rs"
 
 [dependencies]
+uuid = { version = "1", features = ["v4"] }
 threadbear-client = { path = "../client" }
 threadbear-core = { path = "../core" }
 threadbear-dock = { path = "../dock" }

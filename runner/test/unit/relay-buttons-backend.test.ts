@@ -63,3 +63,19 @@ test('the main Mac can press a button and ask for slash commands on another runn
   // Only the main Mac's key queues work for another runner.
   assert.equal(await outcome(call(b.ctx, relay.queueCommand, { key: BRUCE_KEY, runnerId: BRUCE, threadId: 'B', kind: 'press', args: { buttonId: 'abcd1234' } })), 'forbidden');
 });
+
+test('fork calls carry only validated choices and require the owning thread', async () => {
+  const b = await setup();
+  const requestId = '12345678-0000-4000-8000-000000000000';
+  const args = { method: 'threads.fork', params: { workspace: 'worktree', requestId, throughTurnId: 'turn-first', injected: 'drop me' } };
+  const id = await call(b.ctx, relay.queueCommand, { key: OWNER, runnerId: BRUCE, threadId: 'B', kind: 'call', args });
+  assert.deepEqual(b.rows('commands').find((c) => c._id === id)!.args, { method: 'threads.fork', params: { workspace: 'worktree', requestId, throughTurnId: 'turn-first' }, from: 'mac' });
+  const info = await call(b.ctx, relay.queueCommand, { key: OWNER, runnerId: BRUCE, threadId: 'B', kind: 'call', args: { method: 'threads.forkInfo', params: { throughTurnId: 'turn-first' } } });
+  assert.deepEqual(b.rows('commands').find((c) => c._id === info)!.args, { method: 'threads.forkInfo', params: { throughTurnId: 'turn-first' }, from: 'mac' });
+  for (const throughTurnId of [0, null, '', 'x'.repeat(257)]) {
+    assert.equal(await outcome(call(b.ctx, relay.queueCommand, { key: OWNER, runnerId: BRUCE, threadId: 'B', kind: 'call', args: { method: 'threads.fork', params: { workspace: 'same', requestId, throughTurnId } } })), 'badArgs');
+  }
+  assert.equal(await outcome(call(b.ctx, relay.queueCommand, { key: OWNER, runnerId: BRUCE, kind: 'call', args })), 'badArgs');
+  assert.equal(await outcome(call(b.ctx, relay.queueCommand, { key: OWNER, runnerId: BRUCE, threadId: 'B', kind: 'call', args: { method: 'threads.fork', params: { workspace: 'elsewhere', requestId } } })), 'badArgs');
+  assert.equal(await outcome(call(b.ctx, relay.queueCommand, { key: BRUCE_KEY, runnerId: BRUCE, threadId: 'B', kind: 'call', args })), 'forbidden');
+});

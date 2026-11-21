@@ -35,6 +35,12 @@ e9903bf4d left the draft unsent because Return arrived while the picture loaded.
 These focused runs do not refresh the combined table below, which records the
 earlier four-platform run.
 
+On 18 November, the Mac GPUI conversation-fork spec passed all eight
+scenarios and 90 steps, including the inline branch icon after each completed
+reply’s time and cost. It forks through that reply and leaves later replies
+out. The chooser, retry, progress, cancellation and source link also passed.
+This focused run does not replace the earlier four-platform table below.
+
 <!-- parity:start -->
 
 125 of 329 features have a spec so far, across 225 scenarios.

@@ -20,6 +20,8 @@ export type PhoneWhere = { via: string } | { no: string };
 export type Row = { what: string; relay: Where; phone: PhoneWhere };
 
 export const THREAD_REQUESTS: Record<string, Row> = {
+  'threads.forkInfo': { what: 'Checking conversation fork choices', relay: 'yes', phone: { no: 'The first version creates forks from the desktop only.' } },
+  'threads.fork': { what: 'Forking a conversation', relay: 'yes', phone: { no: 'The phone and website read forked history but do not yet create forks.' } },
   'threads.events': { what: 'Reading the transcript', relay: 'yes', phone: { via: 'messages' } },
   'threads.subscribe': { what: 'Following it live (relaySeen skips relay events this reader has)', relay: 'yes', phone: { via: 'messages' } },
   'threads.heldBody': { what: "Opening a tool's output", relay: 'yes', phone: { via: 'eventBody' } },
