@@ -217,7 +217,8 @@ final class RemoteRowActionTests: XCTestCase {
     func testArchivingARowGoesThroughThisMacsRunner() async throws {
         let (app, local) = try await app()
         app.archive("th_bruce")
-        try await until { app.threads["th_bruce"]?.isArchived == true }
+        // The row leaves optimistically before the relay request is sent.
+        try await until { !local.params("threads.update").isEmpty }
         XCTAssertEqual(app.threads["th_bruce"]?.isArchived, true)
         XCTAssertEqual(local.params("threads.update").first?["threadId"] as? String, "th_bruce")
         XCTAssertNil(app.errorMessage)
