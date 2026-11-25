@@ -276,7 +276,9 @@ pub struct Threadbear {
     pub(crate) connectors_panel: crate::connectors_panel::ConnectorsPanelState,
     /// Each thread's slash commands, for the composer's palette.
     pub(crate) slash: crate::slash_palette::SlashState,
-    /// The Move sheet, while it's up (move_sheet.rs).
+    /// The conversation fork chooser, while it is open.
+    pub(crate) fork_sheet: Option<Entity<crate::fork_sheet::ForkSheet>>,
+    /// The Move sheet, while it is open (move_sheet.rs).
     pub(crate) move_sheet: Option<Entity<crate::move_sheet::MoveSheet>>,
     /// The pane beside the thread: Highlights, previews, Patches, Files (highlights.rs).
     pub(crate) side: Entity<SidePane>,
@@ -659,6 +661,7 @@ impl Threadbear {
             connectors_panel: Default::default(),
             slash: Default::default(),
             move_sheet: None,
+            fork_sheet: None,
             side,
             side_views: HashMap::new(),
             sidebar_view: None,
@@ -2130,6 +2133,10 @@ impl Threadbear {
         // An archived session in the thread's place (archive_search.rs),
         // outside the macro, which is at its recursion limit.
         dump["archivePage"] = self.archive_page_dump(cx);
+        dump["forkSheet"] = self
+            .fork_sheet
+            .as_ref()
+            .map_or(Value::Null, |s| s.read(cx).dump());
         // Any other note the window shows outside the banner and the error
         // bar: the sidebar's, when the list couldn't be read. Never the
         // connection's (Mike, 12 Nov: the raw error mid-restart).

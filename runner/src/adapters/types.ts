@@ -310,6 +310,50 @@ export type RewindResult = {
   files?: { undone: string[]; failed: { path: string; reason: string }[] };
 };
 
+// Copies native context without starting a model turn. The caller has made
+// the source idle and resumes the result with the destination's own config.
+export type ForkSessionRequest = {
+  threadId: string;
+  account: Account;
+  cwd: string;
+  destinationCwd: string;
+  sessionId: string;
+  destinationThreadId: string;
+  title: string;
+  through?: { userMessageId: string; assistantItemId?: string; toolCallId?: string; toolResultId?: string };
+  // Runner-owned media/blob directory prefixes only, never workspace paths.
+  pathMap?: Record<string, string>;
+};
+
+export type ForkSessionResult = {
+  sessionId: string;
+  // Claude assigns new message UUIDs. Keep copied user-message turnIds
+  // aligned with them so editing history still reaches the native entry.
+  messageIdMap?: Record<string, string>;
+  // Removes only this new native session if publishing the child fails.
+  cleanup?: () => Promise<void>;
+};
+
+// Native histories can hold local media paths inside tool/message strings.
+// Rebase only supplied directory prefixes, keeping sibling names intact.
+export function rebaseForkPaths<T>(value: T, pathMap?: Record<string, string>): T {
+  if (!pathMap || !Object.keys(pathMap).length) return value;
+  const prefixes = Object.entries(pathMap).sort(([a], [b]) => b.length - a.length);
+  const walk = (v: unknown): unknown => {
+    if (typeof v === 'string') {
+      for (const [from, to] of prefixes) {
+        const escaped = from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        v = (v as string).replace(new RegExp(`${escaped}(?=/|$)`, 'g'), () => to);
+      }
+      return v;
+    }
+    if (Array.isArray(v)) return v.map(walk);
+    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]));
+    return v;
+  };
+  return walk(value) as T;
+}
+
 // The session doesn't have the message (the thread moved to another login
 // or provider since it was sent): there's nothing to cut back to.
 export class RewindRefusedError extends Error {
@@ -363,4 +407,5 @@ export interface AgentAdapter {
   // the files the CLI checkpointed since, where it can. Throws
   // RewindRefusedError when the session doesn't have the message.
   rewind?(req: RewindRequest): Promise<RewindResult>;
+  forkSession?(req: ForkSessionRequest): Promise<ForkSessionResult>;
 }

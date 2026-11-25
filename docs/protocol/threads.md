@@ -273,6 +273,60 @@ Both sides ignore fields they don't know; the app leaves out a row whose
 `kind` it doesn't know, and draws a row whose `id` it doesn't know in grey
 after the ones it does.
 
+## Forking a conversation
+
+The `conversationForks` experiment enables native conversation copies for
+Claude and Codex. `threads.forkInfo { threadId }` returns `{ available,
+reason?, workspace?: { root, head, untracked: string[] } }`. Available means
+the source is idle, has a saved native session, and has no queued messages,
+pending approvals, background work, edit or move. Workspace information is
+absent outside Git. The client shows the destination choice before creating.
+
+`threads.fork { threadId, workspace: "same" | "worktree", requestId, throughTurnId?: string }`
+returns `{ thread: ThreadSummary }`. `requestId` is a client UUID: retries
+return the existing fork even after reconnect or restart. A new worktree
+starts from the source HEAD and includes tracked working-file changes;
+untracked and ignored files stay out, as the chooser says. It never falls
+back to sharing files. The source index is not changed or staged. A source
+that changes during capture causes a refusal. Same-folder forks bypass
+automatic worktree allocation. Neither option starts a model turn.
+If Same folder borrows a Threadbear-managed worktree, the child keeps a
+`worktree.shared` reference. Cleanup retains that checkout while any sharing
+thread is active, and the last archived thread performs normal cleanup.
+Borrowers have no independent Land action for the source's branch.
+
+The new native session and Threadbear thread IDs differ from the source.
+Model, effort, account/pool preference, access, confinement and projects
+carry over. A source folder held as unvouched stays held in a separate
+worktree, including after a runner restart; its copied patches do not gain trust.
+Native tools and environment bind to the destination. Normalized
+history, media and blobs are independent copies, with a source-link note;
+historical controls never become current approvals, cards or actions.
+Copied usage does not count as new spend. Missing native history and
+unsupported providers cause an error, never a summary-based substitute.
+
+The optional `throughTurnId` also applies to `threads.forkInfo`. It must identify
+a visible completed turn by its `turnId`. This stable ID is identical on
+local and relayed transcripts, whose event sequence numbers differ. The reply's footer has a small branch icon
+beside time and cost, with tooltip “Fork from here”. It opens the chooser at
+that boundary: both native context and displayed history include that turn
+and exclude later turns. Missing native boundaries are refused. Retry identity
+includes the boundary. Omitted boundaries retain latest-conversation behavior.
+Workspace choices still copy current tracked edits, without rewinding code.
+Completed events keep an optional native cumulative cost snapshot for nested
+forks. Older replies whose baseline cannot be reconstructed reliably are
+refused rather than recharging copied spend.
+
+The GPUI thread menu and `/fork` open the same chooser. This fork's backend API 100 includes
+the validated owner-key relay calls for fork creation and preview. Requests for another
+runner's thread execute on its owner through the relay. The relay uses
+`threads.forkInfoAt` and `threads.forkAt` for a selected reply, so older
+owners fail the request instead of copying later replies. A virtual runner
+can only host its assigned thread, so it refuses fork requests. Phone and web read
+the copied history through normal mirroring; their creation controls are
+not included in this first version. Code rewind is outside this operation. Older clients ignore its new fields, and newer
+clients hide the action unless `hello.experiments` enables it.
+
 ## Editing a message
 
 Mike can go back to one of his own messages, change it and carry on from

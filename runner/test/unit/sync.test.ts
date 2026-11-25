@@ -792,6 +792,14 @@ function setupFull(opts: { elsewhereThread?: (threadId: string) => ThreadSummary
       buttons: (id) => h.runner.listButtons(id).buttons,
     },
     commands: {
+      forkInfo: async (id, throughTurnId) => {
+        applied.push(`forkInfo ${id} ${throughTurnId}`);
+        return { available: true, choices: [] };
+      },
+      forkThread: async (id, options) => {
+        applied.push(`forkThread ${id} ${options.throughTurnId}`);
+        return { thread: h.runner.get(id) };
+      },
       yearToken: async (accountId, p) => {
         applied.push(`yearToken ${accountId} ${JSON.stringify(p)}`);
         return { state: 'waiting', url: 'https://claude.com/cai/oauth/authorize?state=x' };
@@ -4413,6 +4421,25 @@ test("a runner's message row goes with its wakeReason only from API 98", async (
     assert.equal(note.wakeReason, says ? 'Codex answered' : undefined, `backend ${backend}`);
     await f.sync.stop();
   }
+});
+
+test('the owning runner receives the stable reply boundary for both fork calls', async () => {
+  const { h, sync, push, applied, calls } = setupFull({ apiVersion: BACKEND_API_VERSION });
+  const threadId = h.runner.create({ text: 'go', cwd: h.cfg.defaults.cwd, accountId: 'claude-3' }).thread.id;
+  sync.start();
+  await sync.flushNow();
+  const params = { workspace: 'same', requestId: '12345678-0000-4000-8000-000000000000', throughTurnId: 'source-turn' };
+  push(['forkInfoAt', 'forkAt'].map((method, index) => ({
+    commandId: method, threadId, kind: 'call',
+    args: { method: `threads.${method}`, params, from: 'mac' },
+    createdAt: index + 1,
+  })));
+  await tick(10);
+  assert.deepEqual(applied, [`forkInfo ${threadId} source-turn`, `forkThread ${threadId} source-turn`]);
+  for (const id of ['forkInfoAt', 'forkAt']) {
+    assert.equal(calls.find((c) => c.fn === 'sync:finishCommand' && c.args.commandId === id)?.args.ok, true);
+  }
+  await sync.stop();
 });
 
 // Year-long token… from the Mac's Runners panel (year-token-maker.ts): only

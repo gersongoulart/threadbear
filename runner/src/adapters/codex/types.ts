@@ -75,6 +75,15 @@ export type ThreadStartParams = {
   dynamicTools?: DynamicToolSpec[];
 };
 export type ThreadResumeParams = Omit<ThreadStartParams, 'dynamicTools'> & { threadId: string; excludeTurns: true };
+export type ThreadForkParams = {
+  lastTurnId?: string;
+  threadId: string;
+  cwd: string;
+  config: Record<string, unknown>;
+  excludeTurns: true;
+  deferGoalContinuation: true;
+};
+export type ThreadForkResponse = { thread: Thread & { path?: string | null } };
 export type ThreadStartResponse = {
   thread: Thread;
   model: string;

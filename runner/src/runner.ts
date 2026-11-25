@@ -145,6 +145,7 @@ import { contextUsagePart, type ContextUsageAnswer, type ContextUsagePart } from
 import type { SlashCommand } from './slash-commands.ts';
 import { hibernationPart, leastAuthority, type HibernationPart } from './runner/hibernation.ts';
 import { newThreadsPart, type NewThreadsPart } from './runner/new-threads.ts';
+import { forkIdentityText, forksPart, type ForksPart } from './runner/forks.ts';
 import { warmStartPart, type WarmStartPart, type Spare } from './runner/warm-start.ts';
 import { LAB_REVIEW_ROUNDS, applyAnswers, fixedSinceLastRound, labReviewPart, ledgerCard, openFindings, parseVerdict, type LabReviewPart } from './runner/lab-review.ts';
 import { looseEndsPart, WAITING_TO_LAND_RECHECK_MS, type LooseEndsPart } from './runner/loose-ends.ts';
@@ -419,6 +420,8 @@ export type Turn = {
 export type TurnHold = 'save' | 'setup' | 'broken' | 'token';
 
 export type Runtime = {
+  forking?: boolean;
+  forkIdentityTold?: boolean;
   // On its way to another runner (runner/moves.ts): no turn starts.
   moving?: ThreadMoving;
   // Box mode (runner/moves.ts holdTurns): no turn starts while any of these
@@ -742,7 +745,7 @@ const ACCOUNT_RESCAN_MS = 10_000;
 // this often, always ending on the latest list.
 const ACCOUNTS_THROTTLE_MS = 5_000;
 // Parts of the Runner that live in runner/ (see each file's top).
-export interface Runner extends LooseEndsPart, QuietInboxPart, InboxGuessPart, NestedPart, CeilingPart, MailPart, ColdCompactPart, LabReviewPart, NewThreadsPart, HibernationPart, TitlesPart, HighlightsPart, PatchesPart, EditingPart, ClisPart, ReviewsPart, ButtonsPart, ApprovalsPart, ProjectsHostPart, StoppedWorkPart, HandoversPart, PoolsPart, NetworkPart, WorktreesPart, CommandsPart, ContextUsagePart, MovesPart, WarmStartPart {}
+export interface Runner extends LooseEndsPart, QuietInboxPart, InboxGuessPart, NestedPart, CeilingPart, MailPart, ColdCompactPart, LabReviewPart, ForksPart, NewThreadsPart, HibernationPart, TitlesPart, HighlightsPart, PatchesPart, EditingPart, ClisPart, ReviewsPart, ButtonsPart, ApprovalsPart, ProjectsHostPart, StoppedWorkPart, HandoversPart, PoolsPart, NetworkPart, WorktreesPart, CommandsPart, ContextUsagePart, MovesPart, WarmStartPart {}
 export class Runner {
   // While main.ts is still starting up: waking a thread for its waits
   // (reconcileWaits) would start a CLI whose tools aren't ready, so they
@@ -2054,6 +2057,7 @@ export class Runner {
 
   sendTo(st: ThreadState, text: string, images: ImageRef[], opts: SendOptions = {}): string {
     const { rec, rt } = st;
+    if (rt.forking) throw new RpcError(ErrorCode.busy, 'This conversation is being forked. Send again in a moment.');
     // Written with less access than it has now: Mike's to read, not its
     // agent's (runner/ceiling.ts). Checked again as it leaves the queue.
     if (!this.underCeiling(st, opts.ceiling)) {
@@ -2503,7 +2507,11 @@ export class Runner {
     // An archive's worktree cleanup still running: where this turn starts
     // depends on whether it removed the folder (leaveRemovedWorktree), and
     // a CLI started there meanwhile would have the folder taken from under it.
-    while (rt.cleaning) await rt.cleaning;
+    let cleanup = this.worktreeCleanup(st) ?? rt.cleaning;
+    while (cleanup) {
+      await cleanup;
+      cleanup = this.worktreeCleanup(st) ?? rt.cleaning;
+    }
     if (gone()) return; // interrupted while waiting
     const local = this.runLocalCommand(st, msg);
     if (local === true || (local !== false && (await local))) return;
@@ -2778,6 +2786,7 @@ export class Runner {
   // no wait since; without one, it looks here.
   startSession(st: ThreadState, account: Account, looks?: ClaudeLook[]): void {
     const { rec, rt } = st;
+    rt.forkIdentityTold = false;
     const adapter = this.adapters[rec.provider];
     if (!adapter) throw new Error(`This runner can't run ${providerName(rec.provider)} threads.`);
     // Checked here, where every way a thread runs (a send, a carry-on, a
@@ -3244,6 +3253,7 @@ export class Runner {
       durationMs: Math.max(0, this.clock.now() - turn.startedAt),
     };
     if (turnCost !== undefined) body.costUsd = turnCost;
+    if (r.totalCostUsd !== undefined) body.sessionCostTotal = r.totalCostUsd;
     if (r.usage) body.usage = r.usage;
     if (outcome === 'failed' && r.error) body.error = r.error;
     // Why it failed (a limit, a full context, the login), so the app can
@@ -3956,6 +3966,7 @@ export class Runner {
   }): { thread: ThreadSummary } {
     const st = this.mustGet(params.threadId);
     const { rec, rt } = st;
+    if (rt.forking) throw new RpcError(ErrorCode.busy, 'This conversation is being forked. Try again in a moment.');
     // Checked before anything changes, so a refused rename changes nothing else either.
     if (params.title !== undefined && params.titleBy === 'agent' && rec.titleByMike && params.title.trim() !== rec.title) {
       throw new RpcError(ErrorCode.badParams, `The user named this thread "${rec.title}" themselves, so it keeps that title. Only rename it if they ask you to.`);
@@ -4300,6 +4311,7 @@ export class Runner {
   delete(threadId: string): Record<string, never> {
     const st = this.mustGet(threadId);
     const { rec, rt } = st;
+    if (rt.forking) throw new RpcError(ErrorCode.busy, 'This conversation is being forked. Try again in a moment.');
     rt.deleted = true;
     rt.trashed = true;
     this.threads.delete(threadId);
@@ -4327,10 +4339,7 @@ export class Runner {
     // One still being made and set up is cleaned up by prepareWorktree.
     if (rec.worktree && !rec.worktree.removedAt && !rt.preparing) {
       const cleaning = rt.cleaning;
-      void Promise.resolve(ended ?? rt.closing)
-        .catch(() => undefined)
-        .then(() => cleaning)
-        .then(() => this.cleanUpWorktree(st, true))
+      void this.cleanUpWorktree(st, true, Promise.resolve(ended ?? rt.closing).catch(() => undefined).then(() => cleaning))
         .catch((e: unknown) => this.log.error('worktree cleanup failed', { threadId, error: String(e) }));
     }
     this.store.trash(threadId, this.clock.now());
@@ -5334,7 +5343,8 @@ export class Runner {
     const pressed = this.takePressNews(st);
     const wokeBefore = structuredClone(rec.wakeNews);
     const woke = this.takeWakeNews(st, message.id);
-    const lead = [standing, woke, pressed].filter(Boolean).join('\n\n');
+    const fork = rt.forkIdentityTold ? undefined : forkIdentityText(rec);
+    const lead = [fork, standing, woke, pressed].filter(Boolean).join('\n\n');
     try {
       rt.session!.send(lead ? { ...message, text: `${lead}\n\n${message.text}` } : message);
     } catch (e) {
@@ -5344,6 +5354,7 @@ export class Runner {
       if (wokeBefore) rec.wakeNews = wokeBefore;
       throw e;
     }
+    if (fork) rt.forkIdentityTold = true;
     if (!standing) return;
     // A turn that ends any other way may have dropped it (a message Codex was
     // still holding when Stop came), so the turn's end looks at this.
@@ -5360,6 +5371,7 @@ export class Runner {
   // arrived, so the next message says what's current.
   settleInstructionsNews(st: ThreadState, completed: boolean): void {
     const { rec, rt } = st;
+    if (!completed) rt.forkIdentityTold = false;
     // The check a wake sent (runner/hibernation.ts, wakeToCheck) has run,
     // in its own turn or in one told to do it as it was lost: nothing left
     // to say, and how this turn ends says whether Mike is needed.
@@ -5473,7 +5485,7 @@ export class Runner {
 
 // The Runner's other methods live in parts under runner/, one area each;
 // they go onto its prototype here, as the class's own methods would be.
-for (const part of [looseEndsPart, quietInboxPart, inboxGuessPart, nestedPart, ceilingPart, mailPart, coldCompactPart, labReviewPart, newThreadsPart, hibernationPart, titlesPart, highlightsPart, patchesPart, editingPart, clisPart, reviewsPart, buttonsPart, approvalsPart, projectsHostPart, stoppedWorkPart, handoversPart, poolsPart, networkPart, worktreesPart, commandsPart, contextUsagePart, movesPart, warmStartPart]) {
+for (const part of [looseEndsPart, quietInboxPart, inboxGuessPart, nestedPart, ceilingPart, mailPart, coldCompactPart, labReviewPart, forksPart, newThreadsPart, hibernationPart, titlesPart, highlightsPart, patchesPart, editingPart, clisPart, reviewsPart, buttonsPart, approvalsPart, projectsHostPart, stoppedWorkPart, handoversPart, poolsPart, networkPart, worktreesPart, commandsPart, contextUsagePart, movesPart, warmStartPart]) {
   for (const [key, d] of Object.entries(Object.getOwnPropertyDescriptors(part))) {
     Object.defineProperty(Runner.prototype, key, { ...d, enumerable: false });
   }

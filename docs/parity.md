@@ -24,6 +24,8 @@ and "iPhone" read every thread through Convex, with the same functions (convex/p
 | Pressing a reply button | `buttons.press` | Yes | Yes | Yes | Yes |
 | A message's reply buttons | `buttons.list` | Yes | Yes | Yes | Yes |
 | The slash command list | `threads.commands` | Yes | Yes | Yes | Yes |
+| Checking conversation fork choices | `threads.forkInfo` | Yes | No: The first version creates forks from the desktop only. | No: The first version creates forks from the desktop only. | No: The first version creates forks from the desktop only. |
+| Forking a conversation | `threads.fork` | Yes | No: The phone and website read forked history but do not yet create forks. | No: The phone and website read forked history but do not yet create forks. | No: The phone and website read forked history but do not yet create forks. |
 | Hibernate until something happens | `threads.hibernateWhen` | Yes | No: The phone hibernates until a time only. | No: The phone hibernates until a time only. | No: The phone hibernates until a time only. |
 | Design reviews | `reviews.list` | No: Reviews open in the Mac app from that Mac. | Yes | Yes | No: Design reviews (backend API 86) are not on Android yet. |
 | Reading a design review | `reviews.get` | No: Reviews open in the Mac app from that Mac. | Yes | Yes | No: Design reviews (backend API 86) are not on Android yet. |

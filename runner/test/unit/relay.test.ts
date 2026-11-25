@@ -917,6 +917,38 @@ test("a thread there's slash commands are that runner's list", async () => {
   assert.deepEqual(await list, { commands: [{ name: 'review', description: 'Review the diff' }] });
 });
 
+test('a remote fork waits for its owner and keeps that runner on the returned thread', async () => {
+  const h = harness({ apiVersion: 100 });
+  const requestId = '12345678-0000-4000-8000-000000000000';
+  const result = h.relay.call(T, 'threads.fork', { workspace: 'same', requestId });
+  await patiently(() => Boolean(h.subs.get('relay:commandState')?.length));
+  const command = h.calls.find((c) => c.fn === 'relay:queueCommand')!;
+  assert.deepEqual(command.args.args, { method: 'threads.fork', params: { workspace: 'same', requestId } });
+  h.subs.get('relay:commandState')!.at(-1)!.onUpdate({ state: 'done', result: { thread: { id: 'new-child', title: 'Fork', status: 'idle' } } });
+  const answer = await result as { thread: { runnerId: string; runnerName: string } };
+  assert.equal(answer.thread.runnerId, 'mac-mini');
+  assert.equal(answer.thread.runnerName, 'mac-mini');
+});
+
+test('an earlier-message fork relays the stable turn ID rather than synthetic display sequence', async () => {
+  const h = harness({ apiVersion: 100 });
+  const requestId = '12345678-0000-4000-8000-000000000000';
+  const result = h.relay.call(T, 'threads.fork', { workspace: 'same', requestId, throughTurnId: 'source-turn' });
+  await patiently(() => Boolean(h.subs.get('relay:commandState')?.length));
+  assert.deepEqual(h.calls.find((c) => c.fn === 'relay:queueCommand')!.args.args, { method: 'threads.forkAt', params: { workspace: 'same', requestId, throughTurnId: 'source-turn' } });
+  h.subs.get('relay:commandState')!.at(-1)!.onUpdate({ state: 'done', result: { thread: { id: 'new-child' } } });
+  await result;
+  const old = harness({ apiVersion: 95 });
+  await assert.rejects(old.relay.call(T, 'threads.forkInfo', { throughTurnId: 'source-turn' }), /backend is updated/);
+  assert.equal(old.calls.some((c) => c.fn === 'relay:queueCommand'), false);
+});
+
+test('conversation forks refuse an older backend before queuing a remote request', async () => {
+  const h = harness({ apiVersion: 99 });
+  await assert.rejects(h.relay.call(T, 'threads.forkInfo', {}), /backend is updated/);
+  assert.equal(h.calls.some((c) => c.fn === 'relay:queueCommand'), false);
+});
+
 test('an older backend says buttons and slash commands need it updated, and queues nothing', async () => {
   const h = harness({ apiVersion: 67 });
   await assert.rejects(h.relay.call(T, 'buttons.press', { threadId: T, buttonId: 'abcd1234' }), /backend is updated/);

@@ -26,6 +26,7 @@ export const editingPart = {
     const st = this.mustGet(threadId);
     const { rec, rt } = st;
     this.checkAccepting();
+    if (rt.forking) throw new RpcError(ErrorCode.busy, 'This conversation is being forked. Try again in a moment.');
     // Going back puts files back from the thread's diffs, which name the
     // real folder's files (real-copy.ts).
     if (rec.copied) throw new RpcError(ErrorCode.badParams, COPIED_REFUSAL);

@@ -944,6 +944,7 @@ export type EventBody =
       outcome: TurnOutcome;
       durationMs: number;
       costUsd?: number; // Codex turns have none
+      sessionCostTotal?: number; // Native cumulative baseline for historical forks, never billed
       usage?: ClaudeTurnUsage | CodexTurnUsage | Record<string, unknown>;
       error?: string;
       errorKind?: TurnErrorKind;
@@ -966,7 +967,7 @@ export type EventBody =
   // or was told not to wait (runner/pools.ts). The only notes the backend
   // gets (sync.ts toMessageDoc), so another Mac can say a thread changed
   // login by itself.
-  | { type: 'system.note'; text: string; wake?: true; login?: true; savedMessage?: true; supersededReminder?: string }
+  | { type: 'system.note'; text: string; wake?: true; login?: true; savedMessage?: true; supersededReminder?: string; fork?: true }
   | { type: 'error'; message: string }
   // A command action that ran (patches.ts): its output, truncated like a
   // tool result. Outside any turn.

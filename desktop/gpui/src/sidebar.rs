@@ -409,6 +409,7 @@ pub(crate) enum MenuAction {
     Delete,
     Rename,
     CopyId,
+    Fork,
     Sort(InboxOrder),
     /// A thread in a panel of its own, and back (thread_panels.rs).
     OpenInPanel,
@@ -1396,6 +1397,7 @@ impl Threadbear {
         cx: &mut Context<Self>,
     ) {
         match action {
+            MenuAction::Fork => self.open_fork(id, window, cx),
             MenuAction::Star(on) => self.star_row(&id, on, cx),
             MenuAction::Archive => self.archive_row_sliding(id, window, cx),
             MenuAction::ArchiveAs(verdict) => self.archive_row_as(id, Some(verdict), window, cx),
@@ -1487,6 +1489,11 @@ impl Threadbear {
             },
             MenuRow::submenu("Hibernate", "moon.zzz", self.snooze_menu_rows()),
         ];
+        if self.conversation_forks_enabled() {
+            let mut fork = MenuRow::item("Fork…", "arrow.triangle.branch", MenuAction::Fork);
+            fork.enabled = !t.busy();
+            rows.push(fork);
+        }
         if t.snoozed_until.is_some() {
             rows.push(MenuRow::item("Wake", "sun.max", MenuAction::Wake));
         }
@@ -4693,13 +4700,16 @@ pub(crate) fn automation(
                 return Ok(json!("ok"));
             }
             if let Some(which) = cmd["show"].as_str() {
-                if which != "hibernate" {
-                    return Err(format!("menu-popover show {which:?} isn't drawn here yet"));
-                }
                 let id = target(cx)?;
-                app.update(cx, |t, cx| {
-                    t.open_hibernate_menu(id, point(px(320.), px(160.)), window, cx)
-                });
+                match which {
+                    "hibernate" => app.update(cx, |t, cx| {
+                        t.open_hibernate_menu(id, point(px(320.), px(160.)), window, cx)
+                    }),
+                    "thread" => app.update(cx, |t, cx| {
+                        t.open_row_menu(id, point(px(320.), px(160.)), window, cx)
+                    }),
+                    _ => return Err(format!("menu-popover show {which:?} isn't drawn here yet")),
+                }
                 return Ok(json!("ok"));
             }
             let t = app.read(cx);

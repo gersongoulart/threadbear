@@ -477,10 +477,11 @@ let connectors = {
 };
 addDemoProjects();
 if (process.env.TB_MOCK_LIVE_PAGES) addLivePageDemo(process.env.TB_MOCK_LIVE_PAGES);
-// The experiments the mock's hello says are on: nested threads with
-// TB_MOCK_NESTED, and the done card's Archive menu with TB_MOCK_INBOX_GUESS.
+// The mock also enables conversation forks when TB_MOCK_FORKS is set.
+let mockForkMode = process.env.TB_MOCK_FORKS;
 function mockExperiments() {
   return [
+    ...(process.env.TB_MOCK_FORKS ? ['conversationForks'] : []),
     // TB_MOCK_NESTED_OFF keeps its demo threads with the experiment off.
     ...(process.env.TB_MOCK_NESTED && !process.env.TB_MOCK_NESTED_OFF ? ['nestedThreads'] : []),
     ...(process.env.TB_MOCK_INBOX_GUESS ? ['inboxGuess'] : []),
@@ -964,6 +965,57 @@ async function dispatch(client, method, p) {
     // Moving a thread to another runner (docs/protocol.md): a guess from
     // "that runner", and a move that only marks the row, for the app's
     // Move to menu and sheet.
+    case 'mock.forkLater': {
+      const id = p.threadId;
+      persist(id, { type: 'user.message', text: 'A later question', images: [] }, 'turn_later');
+      persist(id, { type: 'turn.started' }, 'turn_later');
+      persist(id, { type: 'assistant.text', itemId: 'later-answer', text: 'Later-only banana', final: true }, 'turn_later');
+      persist(id, { type: 'turn.completed', outcome: 'completed', durationMs: 1000, costUsd: 0.01, needs: 'nothing' }, 'turn_later');
+      broadcastSummary(id);
+      return {};
+    }
+    case 'threads.forkInfo': {
+      const source = threads.get(p.threadId);
+      if (!process.env.TB_MOCK_FORKS) return { available: false, reason: 'Conversation forks are turned off.' };
+      if (!source) throw rpcError(-32602, 'Thread not found');
+      if (['running', 'starting', 'stopping'].includes(source.summary.status)) return { available: false, reason: 'Wait for this conversation to finish its turn.' };
+      return { available: true, ...(mockForkMode === 'no-git' ? {} : { workspace: { root: source.summary.cwd, head: 'cbc38a03', untracked: ['notes.txt', 'scratch/output.json'] } }) };
+    }
+    case 'threads.fork': {
+      const source = threads.get(p.threadId);
+      if (!process.env.TB_MOCK_FORKS || !source) throw rpcError(-32602, 'Conversation cannot be forked');
+      const previous = [...threads.values()].find(t => t.forkRequestId === p.requestId);
+      if (previous) return { thread: previous.summary };
+      // Slow enough for the progress and duplicate-click specs to observe.
+      await new Promise(resolve => setTimeout(resolve, 500));
+      if (mockForkMode === 'retry' && !source.forkFailed) {
+        source.forkFailed = true;
+        throw rpcError(-32000, 'The native session could not be copied. Retry the fork.');
+      }
+      const id = 'th_fork_' + crypto.randomBytes(6).toString('hex');
+      const summary = { ...structuredClone(source.summary), id, title: source.summary.title + ' (fork)', status: 'idle', live: false, needsYou: false, needs: 'nothing', createdAt: iso(), updatedAt: iso(), lastActivityAt: iso(),
+        ...(p.workspace === 'worktree' ? { cwd: source.summary.cwd + '-fork' } : {}) };
+      for (const field of ['asks', 'asksSeq', 'asked', 'next', 'review', 'background', 'needsFrom', 'pendingReviews']) delete summary[field];
+      const copiedTypes = new Set(['user.message', 'assistant.text', 'reasoning', 'tool.call', 'tool.result', 'edit.diff', 'action.run', 'turn.started', 'turn.completed', 'system.note', 'error']);
+      const boundary = p.throughTurnId === undefined ? undefined : source.events.findLast(e => e.type === 'turn.completed' && e.turnId === p.throughTurnId);
+      if (p.throughTurnId !== undefined && !boundary) throw rpcError(-32602, 'Missing completed reply boundary');
+      const events = structuredClone(source.events).filter(e => copiedTypes.has(e.type) && (!boundary || e.seq <= boundary.seq)).map((e, i) => {
+        e.threadId = id;
+        e.seq = i + 1;
+        if (e.type === 'turn.completed') {
+          for (const field of ['asks', 'next', 'review', 'usage', 'costUsd', 'needsFrom']) delete e[field];
+          e.needs = 'nothing';
+        }
+        return e;
+      });
+      summary.lastSeq = events.length;
+      summary.lastSeenSeq = events.length;
+      threads.set(id, { summary, events, inProgress: new Map(), timers: [], forkRequestId: p.requestId, ...(source.runnerId ? { runnerId: source.runnerId } : {}) });
+      persist(id, { type: 'system.note', fork: true, text: `Forked from [${source.summary.title}](thread:${p.threadId}). This is an independent conversation.` });
+      summary.lastSeenSeq = summary.lastSeq;
+      broadcastSummary(id);
+      return { thread: summary };
+    }
     case 'threads.movePreview': {
       await sleep(500);
       if (moveHold) await moveHold.promise;
@@ -2331,6 +2383,9 @@ async function dispatch(client, method, p) {
       if (!p.quiet) broadcastSummary(entry.summary.id);
       return { thread: entry.summary };
     }
+    case 'mock.forkMode':
+      mockForkMode = p.mode;
+      return {};
     case 'mock.moveLeftBehind':
       moveLeftBehind = p.lines ?? [];
       return { lines: moveLeftBehind };

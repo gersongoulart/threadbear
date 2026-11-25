@@ -20,6 +20,9 @@ import { LAND_TIMES_FILE, isCarried, joinQueue, leaveQueue, queueDir, readEntry,
 
 // What a thread's record keeps about its worktree.
 export type WorktreeRecord = {
+  // A same-folder conversation fork borrows the source's checkout. It
+  // participates in cleanup retention but does not own its Land action.
+  shared?: true;
   repo: string; // the repo's name: the main checkout's folder name ("threadbear")
   mainCheckout: string; // the checkout with main checked out, where it lands
   path: string; // the worktree's root

@@ -928,27 +928,77 @@ impl ThreadPane {
             .into_any_element(),
             None => words.into_any_element(),
         };
+        let mut line = h_flex()
+            .w_full()
+            .max_w(px(MAX_CONTENT_WIDTH))
+            .h(px(FOOTER_HEIGHT))
+            .gap(px(6.))
+            .text_size(px(size::SMALL))
+            .text_color(color)
+            .child(words);
+        if let Some(app) = self
+            .app
+            .upgrade()
+            .filter(|app| app.read(cx).conversation_forks_enabled())
+        {
+            let id = self.summary.id.clone();
+            let turn = done.turn_id.clone();
+            let hover = style::hover_fill(cx);
+            line = line.child(
+                crate::highlights::tipped(
+                    div()
+                        .id(SharedString::from(format!("fork-message-{}", done.turn_id)))
+                        .flex_none()
+                        .size(px(24.))
+                        .rounded(px(5.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(hover)),
+                    "Fork from here",
+                )
+                .on_click(move |_, window, cx| {
+                    app.update(cx, |app, cx| {
+                        app.open_fork_at(id.clone(), Some(turn.clone()), window, cx)
+                    });
+                })
+                .child(
+                    crate::icons::symbol("arrow.triangle.branch")
+                        .with_size(px(14.))
+                        .text_color(color),
+                ),
+            );
+        }
         h_flex()
             .w_full()
             .px(px(SIDE_INSET))
             .justify_center()
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(MAX_CONTENT_WIDTH))
-                    .h(px(FOOTER_HEIGHT))
-                    .flex()
-                    .items_center()
-                    .text_size(px(size::SMALL))
-                    .text_color(color)
-                    .child(words),
-            )
+            .child(line)
             .into_any_element()
     }
 
     /// A quiet centred system note.
     fn note_row(&mut self, row: &Row, note: &str, cx: &mut Context<Self>) -> AnyElement {
         let quiet = style::quiet_text(cx);
+        if row.fork_note {
+            let doc = self.markdown_state(&row.id, note, cx);
+            let text_style = self.reading_style(cx);
+            let text = self
+                .linked_text(&doc, &row.id, cx)
+                .selectable(true)
+                .style(text_style);
+            return row_wrap(
+                row,
+                div()
+                    .py(px(ROW_TOP))
+                    .w_full()
+                    .text_size(px(size::SMALL))
+                    .line_height(px(17.))
+                    .text_color(quiet)
+                    .child(text),
+            );
+        }
         // A block as wide as the column, centred line by line. It used to be
         // a flex row centring a text box with no width of its own, so a long
         // note (the same-work one naming several threads) never wrapped and

@@ -27,6 +27,8 @@ pub struct Row {
     /// Shown inside an open work group. Set on display rows only; the same
     /// item renders differently there.
     pub in_group: bool,
+    /// Provenance is visible and its source link remains usable.
+    pub fork_note: bool,
 }
 
 impl Row {
@@ -38,6 +40,7 @@ impl Row {
             turn_id,
             content,
             in_group: false,
+            fork_note: false,
         }
     }
 

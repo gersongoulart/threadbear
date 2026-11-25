@@ -911,6 +911,8 @@ async function main(): Promise<void> {
     // on whichever runner has the thread.
     commands: {
       ...phoneCommands(runner, peers),
+      forkInfo: (id, throughTurnId) => runner.forkInfo(id, throughTurnId),
+      forkThread: (id, options) => runner.forkThread(id, options),
       // A schedule's own runner gets its command, so the scheduler here is its.
       // Mike's, from his phone: resuming lifts a schedule's ceiling, as from the
       // app (schedules.ts, "Ceilings").

@@ -488,4 +488,7 @@
 //    (onThreads, landing, appRestart) is in view "inbox" though hibernating.
 //    A runner sends it only to a backend of 99 or later. An older app ignores
 //    it, and leaves out those three, as it skips a hibernating inbox row.
-export const API_VERSION = 99;
+
+// 100 in this fork: owner-key relay calls check and create conversation
+//    forks on the owning runner, with an optional inclusive throughTurnId.
+export const API_VERSION = 100;

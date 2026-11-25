@@ -1,3 +1,7 @@
+import path from 'node:path';
+import fs from 'node:fs';
+import crypto from 'node:crypto';
+import type { AgentAdapter } from '../../src/adapters/types.ts';
 // One thread, read three ways, to check they agree (scenarios.test.ts):
 //
 //   here    this runner's own events and summary, as the Mac app reads them
@@ -12,8 +16,6 @@
 // rebuild of a card) shows as the routes disagreeing, not as a bug on Alex's
 // backend. Nothing here touches the network or a model, so it's as quick and
 // steady as a unit test.
-import fs from 'node:fs';
-import path from 'node:path';
 import { makeHarness } from './fakes.ts';
 import { call, load, memoryBackend } from './convex-memory.ts';
 import { ConvexSync } from '../../src/sync.ts';
@@ -53,6 +55,8 @@ export type View = {
 };
 
 export type Play = {
+  /** Make an independent fork after the last turn, then read the child. */
+  fork(throughFirstReply?: boolean): Promise<void>;
   /** The agent writes text. */
   say(text: string): void;
   /** The agent calls end_turn with these args, and the turn ends. */
@@ -204,6 +208,13 @@ export async function playInto(post: Post, runner: { key: string; runnerId: stri
     let n = 0;
     let lastPlan = '';
     await play({
+      fork: async (throughFirstReply) => {
+        fs.writeFileSync(path.join(h.home, 'runner.json'), JSON.stringify({ experiments: { conversationForks: true } }));
+        (h.adapter as AgentAdapter).forkSession = async () => ({ sessionId: crypto.randomUUID() });
+        const throughTurnId = throughFirstReply ? h.runner.events(thread.id).events.find(e => e.type === 'turn.completed')?.turnId : undefined;
+        const copy = await h.runner.forkThread(thread.id, { workspace: 'same', requestId: crypto.randomUUID(), ...(throughTurnId ? { throughTurnId } : {}) });
+        ids[ids.length - 1] = copy.thread.id;
+      },
       say: (text) => s.text(`m${++n}`, text),
       proposePlan: (text) => {
         lastPlan = `p${++n}`;
@@ -290,7 +301,7 @@ function plansOf(events: Record<string, any>[]): string[] {
 
 // A login's notes (system.note with `login`), as their words.
 function loginNotes(events: Record<string, any>[]): string[] {
-  return events.filter((e) => e.type === 'system.note' && (e.login === true || e.savedMessage === true)).map((e) => String(e.text));
+  return events.filter((e) => e.type === 'system.note' && (e.login === true || e.savedMessage === true || e.fork === true)).map((e) => String(e.text));
 }
 
 function lastFailed(events: Record<string, any>[]): boolean {

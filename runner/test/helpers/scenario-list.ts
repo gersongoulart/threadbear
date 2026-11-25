@@ -12,9 +12,21 @@ import { tmpDir } from './fakes.ts';
 
 // shows: words each surface must show for it, which the parity run checks
 // on the website and the Mac app as well as taking their pictures.
-export type Scenario = { name: string; play: (p: Play) => void; shows: string[] };
+export type Scenario = { name: string; play: (p: Play) => void | Promise<void>; shows: string[] };
 
 export const SCENARIOS: Scenario[] = [
+  {
+    name: 'an earlier-reply fork with inactive historical asks and no later replies',
+    shows: ['The agreed colour is purple.', 'Forked from'],
+    play: async (p) => {
+      p.say('The agreed colour is purple.');
+      p.endTurn({ needs: 'you', asks: [{ question: 'Use purple?' }] });
+      p.send('A later direction');
+      p.say('Later-only orange.');
+      p.endTurn({ needs: 'nothing' });
+      await p.fork(true);
+    },
+  },
   {
     name: 'a phone message goes before an old pile of reminders',
     shows: ['Park the work now.', 'The work is parked.', 'Latest check-in'],

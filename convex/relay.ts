@@ -232,7 +232,8 @@ type Kind = (typeof KINDS)[number];
 // for one of that runner's logins: its answer is a state and the claude.ai
 // page, never a token, and its code (useless without the verifier only
 // that runner's setup-token holds) goes with the args once it's finished.
-export const CALLS = new Set(['files.list', 'moves.describe', 'moves.preview', 'accounts.yearToken']);
+const FORK_CALLS = new Set(['threads.forkInfo', 'threads.fork', 'threads.forkInfoAt', 'threads.forkAt']);
+export const CALLS = new Set(['files.list', 'moves.describe', 'moves.preview', 'accounts.yearToken', ...FORK_CALLS]);
 // A moves.preview's thread description: only these fields, each a short
 // string (or worktree and schedules), so nothing else sits in the row.
 const MOVE_INFO_STRINGS = ['title', 'cwd', 'home', 'provider', 'accountId', 'email', 'model', 'effort', 'permissionMode', 'origin', 'repoTop', 'subdir', 'sessionId'];
@@ -338,6 +339,21 @@ export function commandArgs(kind: Kind, raw: unknown): Record<string, unknown> {
       if (a.method === 'moves.preview') {
         const p = (a.params && typeof a.params === 'object' ? a.params : {}) as Record<string, unknown>;
         out = { method: a.method, params: { info: moveInfoArg(p.info), ...(typeof p.cwd === 'string' ? { cwd: p.cwd } : {}), ...(typeof p.accountId === 'string' ? { accountId: p.accountId } : {}) } };
+      } else if (FORK_CALLS.has(String(a.method))) {
+        const p = (a.params && typeof a.params === 'object' ? a.params : {}) as Record<string, unknown>;
+        const create = a.method === 'threads.fork' || a.method === 'threads.forkAt';
+        const historical = a.method === 'threads.forkAt' || a.method === 'threads.forkInfoAt' || p.throughTurnId !== undefined;
+        if (historical && (typeof p.throughTurnId !== 'string' || !p.throughTurnId.trim() || p.throughTurnId.length > 256)) throw bad('throughTurnId must name a completed reply');
+        const boundary = historical ? { throughTurnId: p.throughTurnId } : {};
+        // Translate older callers too. An older owning runner refuses this
+        // method instead of treating a historical fork as a whole fork.
+        if (create) {
+          if (p.workspace !== 'same' && p.workspace !== 'worktree') throw bad('workspace must be same or worktree');
+          if (typeof p.requestId !== 'string' || !/^[a-f0-9-]{36}$/i.test(p.requestId)) throw bad('requestId must be a UUID');
+          out = { method: historical ? 'threads.forkAt' : 'threads.fork', params: { workspace: p.workspace, requestId: p.requestId, ...boundary } };
+        } else {
+          out = { method: historical ? 'threads.forkInfoAt' : 'threads.forkInfo', params: boundary };
+        }
       } else if (a.method === 'moves.describe') {
         out = { method: a.method, params: {} };
       } else if (a.method === 'accounts.yearToken') {
@@ -377,6 +393,8 @@ export const queueCommand = mutation({
   handler: async (ctx, { key, runnerId, threadId, kind, args }) => {
     await runnerAuth(ctx, key, 'queueCommand');
     checkRunnerId(runnerId);
+    const method = kind === 'call' && args && typeof args === 'object' ? (args as { method?: unknown }).method : undefined;
+    if (threadId === undefined && FORK_CALLS.has(String(method))) throw new ConvexError({ kind: 'badArgs', message: 'a fork call needs a thread' });
     const runner = await ctx.db.query('runners').withIndex('by_runnerId', (q) => q.eq('runnerId', runnerId)).unique();
     if (!runner) throw new ConvexError({ kind: 'notFound', message: 'no such runner' });
     if (threadId !== undefined) {

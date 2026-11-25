@@ -3,16 +3,16 @@ import { readYearToken } from '../../year-token.ts';
 import { denySecrets } from '../../secrets-guard.ts';
 import { denyWaitLoop } from '../../wait-loops.ts';
 import os from 'node:os';
-import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
-import type { HookInput, McpServerConfig, ModelInfo, Options, PermissionResult, Query, SDKControlGetContextUsageResponse, SDKUserMessage, PermissionUpdate } from '@anthropic-ai/claude-agent-sdk';
+import { forkSession as sdkForkSession, query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
+import type { HookInput, McpServerConfig, ModelInfo, Options, PermissionResult, Query, SDKControlGetContextUsageResponse, SDKUserMessage, PermissionUpdate, SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk';
 import type { Account, ContextUsage, EffortLevel, ModelChoice, PermissionMode, Question, QueuedAnswers, QueuedCall } from '../../protocol.ts';
 import { isEffortLevel } from '../../protocol.ts';
 import fs from 'node:fs';
-import type { AgentAdapter, AgentSession, RewindRequest, RewindResult, SessionSink, StartSessionOptions, UserInput } from '../types.ts';
-import { RewindRefusedError } from '../types.ts';
+import type { AgentAdapter, AgentSession, ForkSessionRequest, ForkSessionResult, RewindRequest, RewindResult, SessionSink, StartSessionOptions, UserInput } from '../types.ts';
+import { rebaseForkPaths, RewindRefusedError } from '../types.ts';
 import type { SlashCommand } from '../../slash-commands.ts';
 import { frontmatter } from '../../claude-trust.ts';
-import { cutPointBefore, sessionTranscriptPath } from '../../transcripts.ts';
+import { cutPointBefore, projectDirName, sessionTranscriptPath } from '../../transcripts.ts';
 import type { Logger } from '../../log.ts';
 import { ClaudeNormalizer, fileContext } from './normalize.ts';
 import { groupSpawner, type ProcessRegistry } from '../../proc.ts';
@@ -159,6 +159,58 @@ export class ClaudeAdapter implements AgentAdapter {
     const s = new ClaudeSession(opts, sink, this.deps);
     s.start();
     return s;
+  }
+
+  async forkSession(req: ForkSessionRequest): Promise<ForkSessionResult> {
+    const source = sessionTranscriptPath(req.account.configDir, req.cwd, req.sessionId);
+    if (!source) throw new Error('The Claude session to fork was not found.');
+    const original: SessionStoreEntry[] = fs.readFileSync(source, 'utf8').split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line));
+    let upToMessageId: string | undefined;
+    if (req.through) {
+      const userAt = original.findIndex((e) => e.uuid === req.through!.userMessageId && e.type === 'user');
+      const boundary = req.through;
+      const messageId = boundary.assistantItemId?.replace(/:\d+$/, '');
+      const answer = original.findLast((e, i) => {
+        if (i < userAt) return false;
+        const msg = e.message as { id?: string; content?: { type?: string; id?: string; tool_use_id?: string }[] } | undefined;
+        if (messageId) return e.type === 'assistant' && msg?.id === messageId;
+        if (boundary.toolCallId) return e.type === 'assistant' && Array.isArray(msg?.content) && msg.content.some(b => b.type === 'tool_use' && b.id === boundary.toolCallId);
+        if (boundary.toolResultId) return e.type === 'user' && Array.isArray(msg?.content) && msg.content.some(b => b.type === 'tool_result' && b.tool_use_id === boundary.toolResultId);
+        return e.uuid === boundary.userMessageId;
+      });
+      if (userAt < 0 || !answer || typeof answer.uuid !== 'string') throw new Error('The selected message boundary is not in this Claude session.');
+      upToMessageId = answer.uuid;
+    }
+    let copied: SessionStoreEntry[] = [];
+    // SDK filesystem helpers use process-global CLAUDE_CONFIG_DIR. An
+    // explicit store keeps concurrent forks on different logins isolated,
+    // while the SDK still owns UUID/parent/compaction remapping. No CLI,
+    // hooks, MCP servers or model run during this operation.
+    const result = await sdkForkSession(req.sessionId, {
+      dir: req.cwd,
+      title: req.title,
+      ...(upToMessageId ? { upToMessageId } : {}),
+      sessionStore: {
+        load: async (key) => key.sessionId === req.sessionId ? original : null,
+        append: async (_key, entries) => { copied.push(...entries); },
+      },
+    });
+    if (!/^[0-9a-f-]{36}$/i.test(result.sessionId) || result.sessionId === req.sessionId || !copied.length) throw new Error('Claude did not return a fresh forked session.');
+    const messageIdMap: Record<string, string> = {};
+    copied = rebaseForkPaths(copied, req.pathMap).map((entry) => {
+      const from = entry.forkedFrom as { messageUuid?: unknown } | undefined;
+      if (typeof from?.messageUuid === 'string' && typeof entry.uuid === 'string') messageIdMap[from.messageUuid] = entry.uuid;
+      return {
+        ...entry,
+        ...(typeof entry.cwd === 'string' ? { cwd: req.destinationCwd } : {}),
+        ...(typeof entry.relocatedCwd === 'string' ? { relocatedCwd: req.destinationCwd } : {}),
+      };
+    });
+    const destination = path.join(req.account.configDir, 'projects', projectDirName(fs.realpathSync(req.destinationCwd)), `${result.sessionId}.jsonl`);
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    // A fork never replaces an existing session, even on a UUID collision.
+    fs.writeFileSync(destination, copied.map((entry) => JSON.stringify(entry)).join('\n') + '\n', { flag: 'wx', mode: 0o600 });
+    return { sessionId: result.sessionId, messageIdMap, cleanup: async () => { fs.rmSync(destination, { force: true }); } };
   }
 
   // Asks the account's CLI what its model picker offers. Starting the CLI

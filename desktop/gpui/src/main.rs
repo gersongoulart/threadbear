@@ -72,6 +72,7 @@ mod files_store;
 mod fit_picture;
 mod folders;
 mod fonts;
+mod fork_sheet;
 #[cfg(feature = "frame-stats")]
 mod frame_stats;
 mod handover;

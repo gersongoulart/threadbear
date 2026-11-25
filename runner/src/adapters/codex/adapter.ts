@@ -12,8 +12,8 @@ import type { Account, EffortLevel, ModelChoice, PermissionMode } from '../../pr
 import { isEffortLevel } from '../../protocol.ts';
 import type { Logger } from '../../log.ts';
 import type { ProcessRegistry } from '../../proc.ts';
-import type { AdapterOutput, AgentAdapter, AgentSession, RewindRequest, RewindResult, SessionSink, StartSessionOptions, TurnResult, UseResetResult, UserInput } from '../types.ts';
-import { RewindRefusedError, SessionNotFoundError } from '../types.ts';
+import type { AdapterOutput, AgentAdapter, AgentSession, ForkSessionRequest, ForkSessionResult, RewindRequest, RewindResult, SessionSink, StartSessionOptions, TurnResult, UseResetResult, UserInput } from '../types.ts';
+import { rebaseForkPaths, RewindRefusedError, SessionNotFoundError } from '../types.ts';
 import { fileContext, type NormalizerContext } from '../context.ts';
 import {
   AppServerProcess,
@@ -42,6 +42,8 @@ import type {
   RequestId,
   SandboxPolicy,
   SkillsListResponse,
+  ThreadForkParams,
+  ThreadForkResponse,
   ThreadResumeParams,
   ThreadStartParams,
   ThreadStartResponse,
@@ -259,6 +261,65 @@ export class CodexAdapter implements AgentAdapter {
       async (p) => codexSkillCommands(await p.request<SkillsListResponse>('skills/list', { cwds: [cwd] })),
       (p, live) => this.track(p, live),
     );
+  }
+
+  async forkSession(req: ForkSessionRequest): Promise<ForkSessionResult> {
+    const fork = await withShortLivedProcess(
+      { ...this.shortLived(req.account, `fork:${req.destinationThreadId}`), cwd: req.destinationCwd },
+      async (p) => {
+        const boundary = req.through ? await findCodexTurn(p, req.sessionId, req.through.userMessageId) : undefined;
+        if (req.through && !boundary) throw new Error('The selected message boundary is not in this Codex session.');
+        const params: ThreadForkParams = {
+          ...(boundary ? { lastTurnId: boundary.turnId } : {}),
+          threadId: req.sessionId,
+          cwd: req.destinationCwd,
+          config: { ...threadConfig(req.destinationThreadId), 'shell_environment_policy.set.THREADBEAR_THREAD_KEY': '' },
+          excludeTurns: true,
+          // Forking must not automatically continue a source goal.
+          deferGoalContinuation: true,
+        };
+        const result = await p.request<ThreadForkResponse>('thread/fork', params);
+        const id = result?.thread?.id;
+        if (typeof id !== 'string' || !id || id === req.sessionId) throw new Error('Codex did not return a fresh forked session.');
+        try {
+          // Goals are live runtime state. Deferral prevents an initial
+          // continuation; clearing also prevents later autonomous work.
+          await p.request('thread/goal/clear', { threadId: id, origin: 'user' });
+          await p.request('thread/name/set', { threadId: id, name: req.title });
+          return { sessionId: id, path: result.thread.path };
+        } catch (error) {
+          await this.deleteForkInProcess(p, id).catch(() => undefined);
+          throw error;
+        }
+      },
+      (p, live) => this.track(p, live),
+    );
+    const cleanup = () => withShortLivedProcess(
+      this.shortLived(req.account, `discard-fork:${req.destinationThreadId}`),
+      (p) => this.deleteForkInProcess(p, fork.sessionId),
+      (p, live) => this.track(p, live),
+    );
+    try {
+      if (req.pathMap && Object.keys(req.pathMap).length) {
+        // The process must be closed before changing its new rollout; a
+        // live writer could otherwise restore old paths from its cache.
+        if (!fork.path) throw new Error('Codex did not return the fork transcript path needed to copy media.');
+        const file = fs.realpathSync(fork.path);
+        const home = fs.realpathSync(req.account.configDir);
+        if (![path.join(home, 'sessions') + path.sep, path.join(home, 'archived_sessions') + path.sep].some((dir) => file.startsWith(dir))) throw new Error('The fork transcript is outside this Codex account.');
+        const lines = fs.readFileSync(file, 'utf8').split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line));
+        fs.writeFileSync(file, rebaseForkPaths(lines, req.pathMap).map((line) => JSON.stringify(line)).join('\n') + '\n');
+      }
+      return { sessionId: fork.sessionId, cleanup };
+    } catch (error) {
+      await cleanup().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async deleteForkInProcess(p: AppServerProcess, id: string): Promise<void> {
+    await p.request('thread/archive', { threadId: id });
+    await p.request('thread/delete', { threadId: id });
   }
 
   // model/list without hidden models, in Codex's order. With no thread

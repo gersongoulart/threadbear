@@ -7,6 +7,13 @@ and points `upstream` at `mikecann/threadbear`. Read on if you want to
 publish your own build (your own App Store app, your own crash reports,
 your own releases for others) or take features out.
 
+Conversation forks are an off-by-default experiment documented in
+`runner/src/experiments/conversationForks.md`. Its removal instructions
+name the runner snapshot operation, native provider copies, Git workspace
+helper and GPUI controls. Existing forked conversations remain ordinary
+resumable threads if those creation controls are removed. The implementation
+contains no Mike-specific account, host or filesystem path.
+
 ## 1. What's Mike's, and where
 
 These only matter if you ship your own build to other people. Leave them

@@ -622,6 +622,20 @@ thread as leaked and replace it, since the AI provider has seen it too.
 
 <!-- picture: /clips/decisions.mp4 alt: A thread ends with what it needs from you, and one tap answers each -->
 
+With the Conversation forks experiment enabled, an idle Claude or Codex
+thread can be copied with Fork… in its menu, or `/fork` in the desktop
+message box. Each completed reply also has a small branch icon beside its
+time and cost: “Fork from here” copies the conversation through that reply,
+leaving later replies out. Choose Same folder to share its files, or New worktree for a
+separate checkout at the source revision with its tracked edits. Untracked
+and ignored files are excluded from a new worktree; check the list before
+creating it. The new thread keeps the native conversation history and
+independent attachments, and opens ready for your next prompt. The original
+stays available. A shared managed worktree stays while another sharing thread is open.
+Forking does not rewind files or start a model turn. Old
+approval cards and actions are inactive in the copy. Phone and web show
+forked conversations; creating one is currently a desktop action.
+
 Press ⌘N, or click New thread (the pencil beside the search at the top of
 the list), type a message and press Return.
 

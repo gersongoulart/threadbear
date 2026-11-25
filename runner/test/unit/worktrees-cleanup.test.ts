@@ -4,12 +4,111 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { makeHarness, tmpDir } from '../helpers/fakes.ts';
+import crypto from 'node:crypto';
+import type { AgentAdapter } from '../../src/adapters/types.ts';
+import { makeHarness, tick, tmpDir } from '../helpers/fakes.ts';
 import { checkSequence, checkSummary } from '../helpers/protocol-check.ts';
 import { automaticTrust, findWorktreePatch } from '../../src/patches.ts';
 import { cleanUpWorktree, git, gitLimits, land, makeWorktree } from '../../src/worktrees.ts';
 import { PatchTrust } from '../../src/patch-trust.ts';
 import { HUNG_GIT_LIMIT_MS, KEEP, PATCH, TEARDOWN, capture, commit, harness, lines, makeBranch, makeRepo, notes, sh, swapDuringGit, teardowns, threadWithWorktree, trustedTeardownRepo, until, wrapGit, write } from '../helpers/worktrees-harness.ts';
+
+for (const disposition of ['archive', 'delete'] as const) {
+  test(`a shared-folder fork keeps its workspace after source ${disposition}, then releases it when the last child archives`, async () => {
+    const { main } = makeRepo();
+    const h = harness();
+    fs.writeFileSync(path.join(h.home, 'runner.json'), JSON.stringify({ experiments: { conversationForks: true } }));
+    (h.adapter as AgentAdapter).forkSession = async () => ({ sessionId: crypto.randomUUID() });
+    const source = await threadWithWorktree(h, main);
+    const child = await h.runner.forkThread(source.id, { workspace: 'same', requestId: crypto.randomUUID() });
+    if (disposition === 'archive') h.runner.update({ threadId: source.id, archived: true });
+    else h.runner.delete(source.id);
+    await tick(10);
+    assert.ok(fs.existsSync(source.w.path), 'the child must retain the same files');
+    assert.equal(h.runner.get(child.thread.id).cwd, path.join(source.w.path, 'runner'));
+    h.runner.update({ threadId: child.thread.id, archived: true });
+    await until(() => !fs.existsSync(source.w.path) && Boolean(h.runner.mustGet(child.thread.id).rec.worktree?.removedAt), 'the last sharing thread releases the checkout and records its removal');
+    assert.ok(h.runner.mustGet(child.thread.id).rec.worktree?.removedAt);
+  });
+}
+
+test('reopening a shared source waits for the last child cleanup and keeps the active checkout', async () => {
+  const { main } = makeRepo();
+  const h = harness();
+  fs.writeFileSync(path.join(h.home, 'runner.json'), JSON.stringify({ experiments: { conversationForks: true } }));
+  (h.adapter as AgentAdapter).forkSession = async () => ({ sessionId: crypto.randomUUID() });
+  const source = await threadWithWorktree(h, main);
+  const child = await h.runner.forkThread(source.id, { workspace: 'same', requestId: crypto.randomUUID() });
+  h.runner.update({ threadId: source.id, archived: true });
+  await tick(10);
+  let tearingDown = false;
+  let finish!: () => void;
+  h.runner.tearDownWorktree = async () => {
+    tearingDown = true;
+    await new Promise<void>((r) => { finish = r; });
+  };
+  h.runner.update({ threadId: child.thread.id, archived: true });
+  await until(() => tearingDown, 'shared cleanup to begin');
+  const count = h.adapter.sessions.length;
+  h.runner.update({ threadId: source.id, archived: false });
+  h.runner.send(source.id, 'continue here');
+  await tick(10);
+  assert.equal(h.adapter.sessions.length, count, 'the source must wait for the child cleanup');
+  finish();
+  await until(() => h.adapter.sessions.length > count, 'the source to resume after cleanup');
+  assert.ok(fs.existsSync(source.w.path), 'a newly active sharing thread retains the checkout');
+});
+
+test('deleting during archive teardown queues a deletion cleanup after it', async () => {
+  const { main } = makeRepo();
+  const h = harness();
+  const source = await threadWithWorktree(h, main);
+  const st = h.runner.mustGet(source.id);
+  let tearingDown = false;
+  let finish!: () => void;
+  h.runner.tearDownWorktree = async () => {
+    if (tearingDown) return;
+    tearingDown = true;
+    await new Promise<void>((r) => { finish = r; });
+  };
+  h.runner.update({ threadId: source.id, archived: true });
+  await until(() => tearingDown, 'archive teardown to begin');
+  h.runner.delete(source.id);
+  const cleanup = h.runner.worktreeCleanup(st);
+  finish();
+  await cleanup;
+  await tick();
+  assert.equal(fs.existsSync(source.w.path), false, 'deletion must not be lost behind the archive cleanup');
+});
+
+test('a source reopened after shared removal was dispatched resumes in an existing checkout', async () => {
+  const { main } = makeRepo();
+  const h = harness();
+  fs.writeFileSync(path.join(h.home, 'runner.json'), JSON.stringify({ experiments: { conversationForks: true } }));
+  (h.adapter as AgentAdapter).forkSession = async () => ({ sessionId: crypto.randomUUID() });
+  const source = await threadWithWorktree(h, main);
+  const child = await h.runner.forkThread(source.id, { workspace: 'same', requestId: crypto.randomUUID() });
+  h.runner.update({ threadId: source.id, archived: true });
+  await tick(10);
+  const marker = path.join(h.home, 'removing');
+  const restore = wrapGit('worktree remove', `touch '${marker}'; sleep 0.2`);
+  try {
+    h.runner.update({ threadId: child.thread.id, archived: true });
+    await until(() => fs.existsSync(marker), 'git removal to have been dispatched');
+    const count = h.adapter.sessions.length;
+    h.runner.update({ threadId: source.id, archived: false });
+    h.runner.send(source.id, 'continue after the cleanup');
+    await until(() => h.adapter.sessions.length > count || h.runner.get(source.id).status === 'error', 'the source to resume or report a failure');
+    assert.ok(fs.existsSync(h.adapter.last.opts.cwd), 'the native session cannot start in a removed folder');
+    // The removal was dispatched, but the now-active source still has
+    // its branch. Fresh worktree creation falls back to the main checkout.
+    assert.equal(h.adapter.last.opts.cwd, path.join(main, 'runner'));
+    assert.equal(sh(main, `git branch --list ${source.w.branch}`).trim(), source.w.branch);
+    h.adapter.last.init();
+    h.adapter.last.result();
+    assert.equal((await h.runner.forkInfo(source.id)).available, true, 'a resumed conversation in main may be forked again');
+  } finally { restore(); }
+});
 
 test('archiving a thread whose branch is all on main removes its worktree and branch; it comes back in a fresh one', async () => {
   const { root, main } = makeRepo();
