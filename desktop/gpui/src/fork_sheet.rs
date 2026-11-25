@@ -26,7 +26,13 @@ impl Threadbear {
     pub(crate) fn open_fork(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.open_fork_at(id, None, window, cx);
     }
-    pub(crate) fn open_fork_at(&mut self, id: String, through_turn_id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_fork_at(
+        &mut self,
+        id: String,
+        through_turn_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.conversation_forks_enabled() {
             self.show_error(
                 "Conversation forks are turned off in Settings > General > Experiments.".into(),
@@ -114,7 +120,9 @@ impl ForkSheet {
         self.error = None;
         let (client, id) = (self.client.clone(), self.source.id.clone());
         let mut params = json!({"threadId": id});
-        if let Some(turn) = &self.through_turn_id { params["throughTurnId"] = json!(turn); }
+        if let Some(turn) = &self.through_turn_id {
+            params["throughTurnId"] = json!(turn);
+        }
         cx.spawn_in(window, async move |this, cx| {
             let answer = call(client, "threads.forkInfo", params).await;
             this.update_in(cx, |this, _, cx| {
@@ -156,7 +164,9 @@ impl ForkSheet {
         self.error = None;
         let client = self.client.clone();
         let mut params = json!({"threadId": self.source.id, "workspace": if self.worktree { "worktree" } else { "same" }, "requestId": self.request_id});
-        if let Some(turn) = &self.through_turn_id { params["throughTurnId"] = json!(turn); }
+        if let Some(turn) = &self.through_turn_id {
+            params["throughTurnId"] = json!(turn);
+        }
         cx.spawn_in(window, async move |this, cx| {
             let answer = call(client, "threads.fork", params).await;
             this.update_in(cx, |this, window, cx| {

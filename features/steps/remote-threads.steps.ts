@@ -17,6 +17,17 @@ When('its runner lets the thread go to mac-mini while the old Mac still lists it
   await this.app.do({ cmd: 'mock', method: 'moveAway', params: { threadId: d.selection.id, staleIndex: true } });
 });
 
+// That runner's row again in the other runners' table, as any change there
+// sends it (the table never says whether a thread is shared).
+When('mac-mini lists {string} again', async function (this: ThreadbearWorld, title: string) {
+  const d = await this.app.dump();
+  const id = this.thread(d, title)?.id;
+  assert.ok(id, `no row "${title}"`);
+  await this.app.do({ cmd: 'mock', method: 'relist', params: { threadId: id } });
+  // Nothing on screen changes as it lands, so it is given time to.
+  await sleep(500);
+});
+
 Then('the row {string} is on the runner {string}', async function (this: ThreadbearWorld, title: string, runner: string) {
   await this.until(`"${title}" on ${runner}`, (d) => this.thread(d, title)?.runner === runner);
 });
@@ -26,10 +37,12 @@ Then('the row {string} has the machine tile', async function (this: ThreadbearWo
 });
 
 Then('the row {string} isn\'t on another runner', async function (this: ThreadbearWorld, title: string) {
-  const d = await this.app.dump();
-  const t = this.thread(d, title);
-  assert.ok(t, `no row ${title}`);
-  assert.ok(!t.runner, `"${title}" says it's on ${t.runner}`);
+  // Waits, as a move back lands after the runner says so (a slow runner
+  // took longer than one look on 20 Nov's bug hunt).
+  await this.until(`"${title}" on this Mac`, (d) => {
+    const t = this.thread(d, title);
+    return t && !t.runner;
+  });
 });
 
 Then('the composer is on the runner {string}', async function (this: ThreadbearWorld, runner: string) {
@@ -67,10 +80,11 @@ Then('the move was started with the preview it showed', async function (this: Th
 });
 
 Then('the move was started with the preview it showed, for the folder {string}', async function (this: ThreadbearWorld, folder: string) {
-  let params: { previewId?: unknown; cwd?: unknown } | null = null;
+  type Move = { previewId?: unknown; cwd?: unknown };
+  let params: Move | null = null;
   for (let tries = 0; tries < 50 && !params; tries += 1) {
     const text = await this.app.do({ cmd: 'mock', method: 'lastMove', params: {} });
-    params = ((typeof text === 'string' ? JSON.parse(text) : text) as { params?: typeof params }).params ?? null;
+    params = ((typeof text === 'string' ? JSON.parse(text) : text) as { params?: Move }).params ?? null;
     if (!params) await sleep(100);
   }
   assert.match(String(params?.previewId ?? ''), /^mock-preview-/);

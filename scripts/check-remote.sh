@@ -13,6 +13,18 @@
 # doesn't touch ios/, app/ or dock/ (each brings in Swift), with no --shots.
 # Mike asked on 6 Nov, when nine threads' checks queued at once.
 #
+# A landing's check (THREADBEAR_CHECK_FIRST) that needs a Mac, with a Linux
+# host and a Mac host both answering, is split in two run at the same time
+# (split_run, below): the steps a Linux host can run (LINUX_STEPS) there, the
+# rest on the Mac, each half a run of this script of its own (--part), and
+# it passes only if both do. On 24 Nov 34 of 39 landing checks went wholly to
+# Tinker Desk, as nearly every group had a desktop/ or iPhone change, and
+# took 13 to 36 minutes there while the cloud box, twice as quick at the
+# runner's unit tests, sat idle. A split check says "Checking on
+# <linux>+<mac>", and that pair as the host list routes each step the same
+# way again, and only there: tb land runs what failed on the host it failed
+# on (worktrees.ts, findBroken).
+#
 # Mike asked on 6 Nov 2026, after three threads' unit suites, a swift test
 # and three debug apps took his M5 to a load of 75 and a test's window came
 # up over his browser. The host he picked (Tinker Desk) is also where he
@@ -22,7 +34,8 @@
 # them) into ~/.cache/threadbear-check/runs/<id> there, runs check.sh on
 # it, and deletes it. What's kept there between runs is only what makes
 # the next run quick: node_modules per lockfile, the Swift build folders,
-# and a mirror of each checkout that sends to it (mirror/<key>), so a run
+# check.sh's pass records (passes/), and a mirror of each checkout that
+# sends to it (mirror/<key>), so a run
 # sends only what changed since that checkout's last, compressed: a whole
 # copy is 17 MB, and on a congested link (6 Nov) that took minutes. Each
 # run's copy is made from the mirror there. Delete ~/.cache/threadbear-check
@@ -81,6 +94,13 @@ if [ "${1:-}" = "--on-host" ]; then
     -mmin +720 -exec rm -rf {} + 2>/dev/null
   # A checkout's mirror that hasn't sent a run for a week (a removed worktree).
   find "$base/mirror" -mindepth 1 -maxdepth 1 -type d -mtime +7 -exec rm -rf {} + 2>/dev/null
+  # This run has the host now, so it's no longer waiting to go first
+  # (scripts/host-turn.sh); and markers runs that were killed left.
+  rm -f "$base/first/$id"
+  find "$base/first" -mindepth 1 -maxdepth 1 -mmin +720 -exec rm -f {} + 2>/dev/null
+  # Says to what this run starts that it already has the host: a `heavy` job
+  # in it doesn't wait for a landing's check waiting for this one to end.
+  export THREADBEAR_HOST_TURN=1
   # Folders this run makes are private whatever the host's umask (see probe).
   umask 022
   mkdir -p "$TMPDIR"
@@ -129,6 +149,8 @@ if [ "${1:-}" = "--on-host" ]; then
   # Mac to fetch, and everything else goes.
   keep_logs() {
     local rc=$?
+    # The disk sampler (below) writes the lowest it saw and stops.
+    if [ -n "${sampler:-}" ]; then kill "$sampler" 2>/dev/null; wait "$sampler" 2>/dev/null; fi
     cd "$base" || return
     stop_left_in_run
     # A failed run's free space, before its temp files go: if they're what
@@ -153,7 +175,7 @@ if [ "${1:-}" = "--on-host" ]; then
   # each). npm ci only when the lockfile is new.
   # --runner (the runner's self-update) needs only the runner's: a broken
   # lockfile elsewhere mustn't hold the runner back (Codex, 9 Nov).
-  dep_dirs=". runner app/Tools/mock-runner"
+  dep_dirs=". runner mock-runner features"
   case " $* " in *" --runner "*) dep_dirs="runner" ;; esac
   for dir in $dep_dirs; do
     [ -f "$src/$dir/package-lock.json" ] || continue
@@ -199,20 +221,89 @@ if [ "${1:-}" = "--on-host" ]; then
   # change (cargo_step there says why).
   export CARGO_TARGET_DIR="$base/build/desktop-target" THREADBEAR_CHECK_SHARED_TARGET=1 \
     CARGO_HTTP_MULTIPLEXING=false CARGO_NET_RETRY=10
+  # Smaller builds, as remote.sh has them: line numbers but not the rest of
+  # the debug info, and no incremental files. On the cloud box on 21 Nov the
+  # incremental folder was 2.8 of the target's 6.1 GiB, and nothing reuses
+  # it: every run is a fresh copy at src/, its crates touched by check.sh.
+  export CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0
   free_kb="$(cd "$base" && eval "$free_cmd")"
   case "$free_kb" in
     ""|*[!0123456789]*) ;;
-    *) if [ "$free_kb" -lt $((12 * 1048576)) ] && [ -d "$CARGO_TARGET_DIR" ]; then
-         echo "Short of disk here, so the desktop app's cargo target goes; it builds from cold this time."
-         rm -rf "$CARGO_TARGET_DIR"
+    *) if [ "$free_kb" -lt $((12 * 1048576)) ]; then
+         # Idle build folders first, longest unused first, until there's room
+         # (desktop/scripts/trim-remote-cache.sh): the GPUI ones remote.sh
+         # keeps, and cargo targets agents left here by hand, ~13 GiB of
+         # them on the cloud box when a group check ran it out of disk on
+         # 20 Nov. "held": this check has the host's lock it would take.
+         trim="$src/desktop/scripts/trim-remote-cache.sh"
+         if [ -f "$trim" ] && [ -d "$base/gpui" ]; then
+           (cd "$base/gpui" && bash "$trim" - held) 2>&1
+           free_kb="$(cd "$base" && eval "$free_cmd")"
+         fi
+         case "$free_kb" in ""|*[!0123456789]*) free_kb=0 ;; esac
+         if [ "$free_kb" -lt $((12 * 1048576)) ] && [ -d "$CARGO_TARGET_DIR" ]; then
+           echo "Short of disk here, so the desktop app's cargo target goes; it builds from cold this time."
+           rm -rf "$CARGO_TARGET_DIR"
+         fi
        fi ;;
   esac
+  # The lowest the disk goes during the run, every few seconds, for this Mac
+  # to read if it fails: a full disk breaks a build in ways that say nothing
+  # about space, and the disk can have room again by the time anyone asks
+  # (20 Nov: 0.1 GiB free mid-check, 8.3 after). Written over in place, in a
+  # file made now while there's room, as a full disk can't take a new one.
+  # A run that went under 1 GiB is tried again on another host.
+  min_file="$base/kept-$id/min-free-kb"
+  sampler=""
+  start_kb="$free_kb"
+  case "$start_kb" in ""|*[!0123456789]*) start_kb=999999999999999 ;; esac
+  [ "${#start_kb}" -le 15 ] || start_kb=999999999999999
+  if mkdir -p "$base/kept-$id" && printf '%015d' "$((10#$start_kb))" >"$min_file" 2>/dev/null; then
+    # It stops with this script however that ends: it may have this host's
+    # lock open (inherited from the flock that runs this), and one left
+    # behind would keep every later check out.
+    parent=$$
+    (
+      # Nothing it inherited stays open in it or its sleeps: Linux's flock
+      # hands its lock to the command it runs as an open file, and a sleep
+      # still holding that after the run would keep the next check, or this
+      # check's own retry, out (Gemini's review).
+      for fd in $(ls /dev/fd 2>/dev/null); do
+        case "$fd" in 0|1|2|*[!0123456789]*) ;; *) eval "exec $fd>&-" 2>/dev/null ;; esac
+      done
+      low="" kb="" nap=""
+      sample() {
+        kb="$(cd "$base" && eval "$free_cmd")"
+        # Past a disk's reserved blocks df can say less than nothing.
+        case "$kb" in -[0123456789]*) kb=0 ;; esac
+        case "$kb" in ""|*[!0123456789]*) return ;; esac
+        if [ "${#kb}" -le 15 ] && { [ -z "$low" ] || [ "$((10#$kb))" -lt "$low" ]; }; then
+          low="$((10#$kb))"
+          printf '%015d' "$low" 1<>"$min_file" 2>/dev/null
+        fi
+      }
+      # On TERM, one last look (a link can fill the disk between two), and
+      # the lowest written once more in case a write failed then.
+      trap '[ -z "$nap" ] || kill "$nap" 2>/dev/null; sample; [ -z "$low" ] || printf "%015d" "$low" 1<>"$min_file"; exit 0' TERM
+      while kill -0 "$parent" 2>/dev/null; do
+        sample
+        sleep "${THREADBEAR_CHECK_SAMPLE_SECS:-5}" & nap=$!
+        wait "$nap"
+        nap=""
+      done
+    ) </dev/null >/dev/null 2>&1 &
+    sampler=$!
+  fi
 
   cd "$src" || exit 1
+  # check.sh's pass records (scripts/check-cache.mjs) are this host's own,
+  # kept here between runs with the rest of what makes the next run quick:
+  # not in ~/Library/Caches/Threadbear, which would look like an install on
+  # the Mac Mike tries clean installs on, and the same on Linux.
   # Under a limit of its own as well: this Mac giving up on it (a dropped
   # connection, its MAX_SECS) doesn't stop it here, and it holds this host's
   # lock while it runs (Codex's review). Its Swift steps have shorter ones.
-  THREADBEAR_CHECK_CHANGED_FILE="$src/.check-changed" THREADBEAR_NODE="$NODE" \
+  THREADBEAR_CHECK_PASSES="$base/passes" THREADBEAR_CHECK_CHANGED_FILE="$src/.check-changed" THREADBEAR_NODE="$NODE" \
     "$NODE" "$src/scripts/limit-step.mjs" --silence 3600 --total "${THREADBEAR_CHECK_HOST_MAX_SECS:-7200}" -- ./check.sh --local "$@"
   code=$?
   # limit-step's 124 is what this Mac takes for a host that dropped out, which
@@ -224,6 +315,20 @@ fi
 # ---- On this Mac
 HOST_LIST="${1:?usage: check-remote.sh <ssh host>[,<ssh host>...] [check.sh options]}"
 shift
+# <linux>+<mac>: a split check's pair (above), from its "Checking on" line.
+HOST_RE='^[A-Za-z0-9][A-Za-z0-9._@-]*$'
+PAIR_L="" PAIR_M=""
+case "$HOST_LIST" in
+  *+*)
+    PAIR_L="${HOST_LIST%%+*}" PAIR_M="${HOST_LIST#*+}"
+    if ! [[ "$PAIR_L" =~ $HOST_RE ]] || ! [[ "$PAIR_M" =~ $HOST_RE ]]; then
+      echo "A host pair is <linux host>+<mac host>, not: $HOST_LIST" >&2
+      exit 2
+    fi
+    HOST_LIST="$PAIR_L,$PAIR_M"
+    # Nothing else is tried: each step goes back where it ran.
+    unset THREADBEAR_CHECK_PREFER ;;
+esac
 read -ra HOSTS <<<"$(printf '%s' "$HOST_LIST" | tr ',' ' ')"
 # THREADBEAR_CHECK_PREFER: hosts to try first, the rest of the list still
 # behind them. tb land sets it for a group's check from what each landing in
@@ -401,6 +506,7 @@ over_time() {
 ARGS=()
 SHOTS=""
 ONLY=""
+PART=""
 QUICK=0
 RUNNER_ONLY=0
 ALL=0
@@ -414,6 +520,8 @@ while [ $# -gt 0 ]; do
     --all) ALL=1; ARGS+=("$1") ;;
     # Its value goes with it, whatever it looks like (check.sh has checked it).
     --only) ONLY="${2:-}"; ARGS+=("$1" "${2:-}"); shift ;;
+    # One half of a split check (split_run): check.sh runs only its steps.
+    --part) PART="${2:-}"; ARGS+=("$1" "${2:-}"); shift ;;
     *) ARGS+=("$1") ;;
   esac
   shift
@@ -430,23 +538,18 @@ changed="$(mktemp)"
 
 # Whether a Linux host can run this: only the runner's, Convex's and the
 # website's checks, so --quick, nothing changed under ios/ (ThreadbearKit's
-# tests), app/ or dock/ (the Mac app's release build) beyond what the GPUI
-# app shares (scripts/swift-freeze.sh --gpui-shared: the mock runner,
-# fixtures, art, which the Swift app's build no longer runs for, but not
-# the mock runner, whose Swift tests still run), and
-# something changed (with nothing, check.sh itself or --all, it runs
-# everything), no shots.
+# tests), app/ or dock/ (the Mac app's release build) or the mock runner
+# (its Swift tests, which check.sh runs whenever it or they change:
+# swift-freeze.sh --mock-tests), and something changed (with nothing,
+# check.sh itself or --all, it runs everything), no shots. What the GPUI
+# app shares with the Swift app (shared/'s art and Pele) is outside app/
+# since 21 Nov 2026 and doesn't build the frozen Swift app, so it can go to
+# Linux.
 linux_ok=0
-GPUI_SHARED="$("$ROOT/scripts/swift-freeze.sh" --gpui-shared 2>/dev/null)"
-# Without it, nothing counts as shared: an empty pattern would match every
-# line, and every change would look like none.
-[ -n "$GPUI_SHARED" ] || GPUI_SHARED='^$'
-# The mock runner, though shared, has Swift tests check.sh runs whenever it
-# or they change (swift-freeze.sh --mock-tests), and those need a Mac.
 MOCK_TESTS="$("$ROOT/scripts/swift-freeze.sh" --mock-tests 2>/dev/null | head -1)"
 [ -n "$MOCK_TESTS" ] || MOCK_TESTS='^$'
 if [ "$QUICK" = 1 ] && [ "$ALL" = 0 ] && [ -z "$SHOTS" ] && [ -s "$changed" ] \
-  && ! grep -qE '^ios/|^check\.sh$' "$changed" && ! grep -vE "$GPUI_SHARED" "$changed" | grep -E '^(app|dock)/' >/dev/null \
+  && ! grep -qE '^ios/|^check\.sh$' "$changed" && ! grep -E '^(app|dock)/' "$changed" >/dev/null \
   && ! grep -E "$MOCK_TESTS" "$changed" >/dev/null; then linux_ok=1; fi
 # (grep to /dev/null, not -q: -q closing the pipe early fails grep -v under
 # pipefail, and a big change would have looked like none.)
@@ -462,7 +565,9 @@ if [ "$RUNNER_ONLY" = 1 ] && [ -z "$SHOTS" ]; then linux_ok=1; fi
 # this a failure on the Linux box could never be looked into there (Codex's
 # review, 17 Nov). With --all too: tb land asks for it on main's run there,
 # and with --only it only forces the steps named (Codex's review, 17 Nov).
-LINUX_STEPS='^(runner typecheck|app tools parse|convex typecheck|web typecheck|web tests|site build|feature pairing|runner unit tests|desktop core tests|desktop app check|desktop app check \(as installed\)|[a-z ]+ packages)$'
+# check.sh --part reads this line too (keep it one line, in single quotes):
+# its Linux half runs exactly these, its Mac half the rest.
+LINUX_STEPS='^(runner typecheck|app tools parse|convex typecheck|web typecheck|web tests|lint|site build|feature pairing|features typecheck|runner unit tests|desktop format|desktop lint|desktop core tests|desktop app check|desktop app check \(as installed\)|[a-z ]+ packages)$'
 if [ -n "$ONLY" ] && [ "$QUICK" = 1 ] && [ -z "$SHOTS" ]; then
   linux_ok=1
   only_rest="$ONLY;"
@@ -472,6 +577,8 @@ if [ -n "$ONLY" ] && [ "$QUICK" = 1 ] && [ -z "$SHOTS" ]; then
     [[ "${only_name%%=*}" =~ $LINUX_STEPS ]] || linux_ok=0
   done
 fi
+# The Linux half of a split check runs only what a Linux host can.
+if [ "$PART" = linux ] && [ "$QUICK" = 1 ] && [ -z "$SHOTS" ]; then linux_ok=1; fi
 # Why it needs a Mac, for the message when only Linux hosts answered.
 MAC_WHY="it isn't --quick"
 if [ "$QUICK" = 1 ]; then
@@ -491,6 +598,26 @@ fi
 # says which) writes only the node_modules and its temp files.
 MIN_FREE_GIB=8
 [ "$linux_ok" = 0 ] || MIN_FREE_GIB=2
+# A run that builds desktop/'s Rust wants as much as one with Swift, Linux
+# or not: cargo test, clippy and the app's two checks each build a set of
+# their own into its target, several GiB from cold, where 2 GiB is all a
+# Linux run asked for until the cloud box ran out during one (20 Nov).
+# Whether it does
+# is check.sh's own DESKTOP_NEEDS, read from it so the two can't differ:
+# what changed matches it, or nothing has (main runs everything), or --only
+# names a desktop step. Not --runner, which builds none.
+DESKTOP_NEEDS="$(sed -n "s/^DESKTOP_NEEDS='\(.*\)'\$/\1/p" "$ROOT/check.sh" 2>/dev/null | head -1)"
+builds_rust=0
+if [ -n "$DESKTOP_NEEDS" ] && [ "$RUNNER_ONLY" = 0 ]; then
+  if [ -n "$ONLY" ]; then
+    rust_steps=';desktop (core tests|lint|app check|macos check|build)'
+    [[ ";$ONLY" =~ $rust_steps ]] && builds_rust=1
+  elif [ "$ALL" = 1 ] || [ ! -s "$changed" ] || grep -E "$DESKTOP_NEEDS|^check\.sh\$" "$changed" >/dev/null; then
+    builds_rust=1
+  fi
+fi
+RUST_FREE_GIB=8
+[ "$builds_rust" = 0 ] || [ "$MIN_FREE_GIB" -ge "$RUST_FREE_GIB" ] || MIN_FREE_GIB=$RUST_FREE_GIB
 
 # Whether a df answer is under the limit: 0 yes, and FREE_GIB is it to one
 # place, rounded down; 1 no; 2 it isn't a number we can use. It's the host's
@@ -505,6 +632,19 @@ low_on_room() {
   local kb=$((10#$1))
   [ "$kb" -lt $((MIN_FREE_GIB * 1048576)) ] || return 1
   FREE_GIB="$((kb / 1048576)).$(((kb % 1048576) * 10 / 1048576))"
+}
+# Whether the disk ran out during a run: under 1 GiB at its lowest, which
+# remote.sh treats as a run that may have failed for want of space too.
+# OUT_GIB is it to one place. Only a number we can read counts.
+OUT_GIB=""
+ran_out() {
+  local kb="$1"
+  case "$kb" in -[0123456789]*) kb=0 ;; esac
+  case "$kb" in ""|*[!0123456789]*) return 1 ;; esac
+  [ "${#kb}" -le 15 ] || return 1
+  kb=$((10#$kb))
+  [ "$kb" -lt 1048576 ] || return 1
+  OUT_GIB="$((kb / 1048576)).$(((kb % 1048576) * 10 / 1048576))"
 }
 # The host just used, asked again after something failed there: true, with
 # FREE_GIB set, if it's low. Not if it's fine or can't be asked.
@@ -686,7 +826,9 @@ leave_line() {
     # Still there after a claim: it never reached the host, so claim again.
     free_elsewhere || continue
     claimed=1
-    timed "$ASK_SECS" "${SSH[@]}" "$HOST" "mv '$remote_run' '$remote_run.withdrawn'" >/dev/null 2>&1 </dev/null
+    # Its mark as a landing's check waiting there goes too, so nothing on
+    # that host waits for a check that isn't coming (scripts/host-turn.sh).
+    timed "$ASK_SECS" "${SSH[@]}" "$HOST" "mv '$remote_run' '$remote_run.withdrawn'; rm -f '$remote_base/first/$id'" >/dev/null 2>&1 </dev/null
     where="$(where_is_copy)"
     [ "$where" != started ] || return 1
     [ "$where" != withdrawn ] || break
@@ -716,6 +858,28 @@ left_out="$(mktemp)"
 BASE_ARGS=(${ARGS[@]+"${ARGS[@]}"})
 SKIP=""
 tries=0
+# Checks that failed on a host that ran out of disk during them, run again
+# elsewhere (below): at most DISK_RETRIES, so a change whose own tests fill
+# a disk still ends.
+disk_tries=0
+DISK_RETRIES="${THREADBEAR_CHECK_DISK_RETRIES:-2}"
+# The hosts set aside after running out of disk, while the others are tried.
+# back_to_out_host: none of those could take it, so they all go back in,
+# with their idle build folders given back, and it's chosen again among them
+# (one may have room again now its run's files have gone; Codex's review).
+OUT_HOSTS=""
+back_to_out_host() {
+  [ -n "$OUT_HOSTS" ] || return 1
+  local hs="$OUT_HOSTS" rest="" s h
+  OUT_HOSTS=""
+  for s in $SKIP; do case " $hs " in *" $s "*) ;; *) rest+=" $s" ;; esac; done
+  SKIP="$rest"
+  for h in $hs; do
+    echo "No other host could take it, so $h is tried again, after giving back idle build folders there." >&2
+    make_room "$h" '$HOME/'"$BASE_REL" >/dev/null 2>&1
+  done
+  choose
+}
 # The copy lock: a kernel lock (lockf, or flock on Linux) held by a small
 # helper until this run lets go or ends, so one a killed run held frees
 # itself. The helper looks every second for its release file and for
@@ -762,9 +926,12 @@ drop_copylock() {
   rm -f "$release"
   holder="" release=""
 }
+# A split check's folder for its halves' output (split_run).
+split_dir=""
 finish() {
   drop_copylock
   [ -z "$sentinels" ] || rm -rf "$sentinels"
+  [ -z "$split_dir" ] || rm -rf "$split_dir"
 }
 trap finish EXIT
 # A signal stops everything this started, the ssh to the check host among
@@ -808,13 +975,178 @@ rewrite_logs() {
 # tests.
 copied_host="" copy_secs=0 moves=""
 stay_secs="${THREADBEAR_CHECK_STAY_SECS:-60}"
+# A landing's check (THREADBEAR_CHECK_FIRST, from tb land) goes ahead of
+# whatever else is waiting on its host (scripts/host-turn.sh), and never
+# stays in line on a busy host for its copy's sake: every other landing waits
+# while it does. A copy is seconds since each checkout has a mirror there,
+# and a slow one (949 s to Tinker Desk on 23 Nov, behind builds) says more
+# about the host than the link. So it always looks for a free host instead.
+TURN=after
+if [ "${THREADBEAR_CHECK_FIRST:-}" = 1 ]; then
+  TURN=first
+  stay_secs=999999999
+fi
+
+# ---- Split across a Linux host and a Mac (the comment at the top). Each
+# half is this script again with --part, given only the hosts of its kind,
+# so a step can't drift to the other kind of host. Its output is shown as
+# it comes, each line marked with its half, then once more, merged, as one
+# check's: one "Checking on" line naming both hosts, each half's lines from
+# its last run (a half moves on from a host that drops out), and one "To
+# run only what failed again" and one "--only ran" line for both, which is
+# what tb land reads (worktrees.ts, parseCheckTimes, onlyFailed, onlyRan).
+# What a half exits with when no host could take it, told to it and turned
+# back into this run's BUSY_EXIT (or 255) here.
+SPLIT_BUSY=69
+# names_linux_step: whether any step of the run is a Linux host's: every
+# --quick run's runner typecheck, or one --only names.
+names_linux_step() {
+  [ -n "$ONLY" ] || return 0
+  local rest="$ONLY;" name
+  while [ -n "$rest" ]; do
+    name="${rest%%;*}"
+    rest="${rest#*;}"
+    [[ "${name%%=*}" =~ $LINUX_STEPS ]] && return 0
+  done
+  return 1
+}
+# can_split: a --quick run that needs a Mac and has steps a Linux host can
+# take. Not --shots (Desk Runner's), not --runner (all Linux), not a half.
+can_split() {
+  [ -z "$PART" ] && [ "$QUICK" = 1 ] && [ "$RUNNER_ONLY" = 0 ] && [ -z "$SHOTS" ] && [ "$linux_ok" = 0 ] && names_linux_step
+}
+# host_os <host>: what the probe says it runs, or nothing.
+host_os() {
+  local out
+  out="$(timed 30 "${SSH[@]}" "$1" "$probe" 2>/dev/null </dev/null)" || return 0
+  sed -n 2p <<<"$out"
+}
+# half <label> <hosts> <part> <out file> [max secs]: one half, its output
+# kept in <out file> and shown marked, its exit in <out file>.code.
+half() {
+  (
+    env -u THREADBEAR_CHECK_PREFER THREADBEAR_CHECK_BUSY_EXIT="$SPLIT_BUSY" ${5:+"THREADBEAR_CHECK_MAX_SECS=$5"} \
+      /bin/bash "$ROOT/scripts/check-remote.sh" "$2" ${ARGS[@]+"${ARGS[@]}"} --part "$3" </dev/null 2>&1
+    echo "$?" >"$4.code"
+  ) | tee "$4" | LC_ALL=C awk -v p="[$1] " '{ print p $0; fflush() }'
+}
+couldnt_run() { [ "$1" = "$SPLIT_BUSY" ] || [ "$1" = 255 ]; }
+# A half's last run (tb land's lastRun), where it ran, and its copy's time.
+last_run_of() { awk '/^Checking on [^ ]+ \(/ { n = 0; next } { l[++n] = $0 } END { for (i = 1; i <= n; i++) print l[i] }' "$1"; }
+host_of() { sed -n 's/^Checking on \([^ ]*\) (.*/\1/p' "$1" | tail -n 1; }
+copy_of() { grep -E '^Checking on [^ ]+ \(' "$1" | tail -n 1 | sed -n 's/^Checking on [^ ]* (copied in \([0-9]*\)s.*/\1/p'; }
+# split_run <linux hosts> <mac hosts>: runs both halves and exits as the
+# check: failed if either failed, else no host if either couldn't run.
+split_run() {
+  local lh="$1" mh="$2" sd lpid mpid lcode lfirst mcode f a r again="" ran="" said_ran=0 lhost mhost on copy="" c code=0
+  rm -f "$files" "$changed" "$left_out"
+  sd="$(mktemp -d "${TMPDIR:-/tmp}/tb-check-split.XXXXXX")" || { echo "Couldn't make a folder for the split check's output." >&2; exit 1; }
+  split_dir="$sd"
+  echo "Splitting this check: the steps that need no Mac run on $lh, the ones that need a Mac on $mh, at the same time."
+  # Each half gets what's left of this run's MAX_SECS, not a whole one of
+  # its own from when it starts (Codex's review).
+  c=$((DEADLINE - $(date +%s)))
+  [ "$c" -ge 1 ] || over_time busy
+  half "no Mac" "$lh" linux "$sd/linux" "$c" &
+  lpid=$!
+  half "Mac" "$mh" mac "$sd/mac" "$c" &
+  mpid=$!
+  wait "$lpid"
+  lcode="$(cat "$sd/linux.code" 2>/dev/null)"
+  lfirst="${lcode:-1}"
+  # No Linux host could take its half (gone, out of room): the Mac hosts
+  # can run it too, after their own half, rather than nothing pass. Not for
+  # a pair, where each step goes back only to where it ran.
+  c=$((DEADLINE - $(date +%s)))
+  if [ -z "$PAIR_L" ] && couldnt_run "$lfirst" && [ "$c" -ge 1 ]; then
+    echo "No host of $lh could take the half that needs no Mac, so it runs on $mh as well."
+    half "no Mac" "$mh" linux "$sd/linux" "$c" &
+    lpid=$!
+  fi
+  wait "$mpid"
+  wait "$lpid"
+  lcode="$(cat "$sd/linux.code" 2>/dev/null)" mcode="$(cat "$sd/mac.code" 2>/dev/null)"
+  lcode="${lcode:-1}" mcode="${mcode:-1}"
+  # A half no host could run says nothing about the check: not where it
+  # ran, nor what failed in it (a disk that filled, every try), which tb
+  # land would otherwise look for in the landings (Gemini's review). Its
+  # own lines, shown marked above, say why.
+  couldnt_run "$lcode" && : >"$sd/linux"
+  couldnt_run "$mcode" && : >"$sd/mac"
+  lhost="$(host_of "$sd/linux")" mhost="$(host_of "$sd/mac")"
+  for f in "$sd/linux" "$sd/mac"; do
+    last_run_of "$f" >"$f.last"
+    a="$(sed -n 's/^To run only what failed again: \(\.\/check\.sh \)\{0,1\}--only "\(.*\)"$/\2/p' "$f.last" | tail -n 1)"
+    [ -z "$a" ] || again+="${again:+;}$a"
+    if grep -q '^--only ran: "' "$f.last"; then
+      said_ran=1
+      r="$(sed -n 's/^--only ran: "\(.*\)"$/\1/p' "$f.last" | tail -n 1)"
+      [ -z "$r" ] || ran+="${ran:+;}$r"
+    fi
+    c="$(copy_of "$f")"
+    if [ -n "$c" ] && { [ -z "$copy" ] || [ "$c" -gt "$copy" ]; }; then copy="$c"; fi
+  done
+  if [ -n "$lhost" ] && [ -n "$mhost" ] && [ "$lhost" != "$mhost" ]; then on="$lhost+$mhost"; else on="${mhost:-$lhost}"; fi
+  echo
+  [ -z "$on" ] || echo "Checking on $on (${copy:+copied in ${copy}s; }split: the steps that need no Mac on ${lhost:-no host}, the ones that need a Mac on ${mhost:-no host})"
+  for f in "$sd/linux" "$sd/mac"; do
+    grep -vE '^(To run only what failed again: |--only ran: ")' "$f.last"
+  done
+  if [ -n "$again" ]; then
+    echo
+    echo "To run only what failed again: ./check.sh --only \"$again\""
+  fi
+  [ "$said_ran" = 0 ] || echo "--only ran: \"$ran\""
+  rm -rf "$sd"
+  split_dir=""
+  # Only some of what --only asked for ran (tb land's runs of what failed,
+  # main's among them): not a pass or a failure of the rest, so no host
+  # could run it, rather than main or a landing being blamed for a step that
+  # never ran (Gemini's review).
+  if [ -n "$ONLY" ] && { couldnt_run "$lcode" || couldnt_run "$mcode"; }; then
+    echo "Half of this run of named steps couldn't run on any host, so it says nothing about them." >&2
+    code="$BUSY_EXIT"
+  elif [ "$lcode" != 0 ] && ! couldnt_run "$lcode"; then code="$lcode"
+  elif [ "$mcode" != 0 ] && ! couldnt_run "$mcode"; then code="$mcode"
+  elif [ "$lcode" = 255 ] && [ "$mcode" = 255 ] && [ "$lfirst" = 255 ]; then
+    # (A Linux host that answered but couldn't take it, 69 the first time, is
+    # still there: not a reason to run it all on this Mac. Codex's review.)
+    echo "None of $lh, $mh can be reached, so this check can't run on any of them now." >&2
+    code=255
+  elif [ "$lcode" != 0 ] || [ "$mcode" != 0 ]; then
+    couldnt_run "$mcode" && echo "No host of $mh could take the half of this check that needs a Mac, so it didn't pass." >&2
+    couldnt_run "$lcode" && echo "No host could take the half of this check that needs no Mac, so it didn't pass." >&2
+    code="$BUSY_EXIT"
+  fi
+  exit "$code"
+}
+if [ -n "$PAIR_L" ] && [ -z "$PART" ]; then
+  if [ "$linux_ok" = 1 ]; then
+    HOSTS=("$PAIR_L")
+  elif can_split; then
+    split_run "$PAIR_L" "$PAIR_M"
+  else
+    HOSTS=("$PAIR_M")
+  fi
+  HOST_LIST="${HOSTS[0]}"
+elif [ "${THREADBEAR_CHECK_FIRST:-}" = 1 ] && [ "${#HOSTS[@]}" -gt 1 ] && can_split; then
+  split_l="" split_m=""
+  for h in "${HOSTS[@]}"; do
+    case "$h" in -*|"") continue ;; esac
+    case "$(host_os "$h")" in
+      Linux) split_l+="${split_l:+,}$h" ;;
+      Darwin) split_m+="${split_m:+,}$h" ;;
+    esac
+  done
+  [ -z "$split_l" ] || [ -z "$split_m" ] || split_run "$split_l" "$split_m"
+fi
 while :; do
   # A disk that's filled up since (the check that won may have done it) is no
   # place to wait: choosing again passes it over and deletes the copy.
   if [ -n "$copied_host" ] && [ "$copy_secs" -ge "$stay_secs" ] && ! host_is_low; then
     # HOST, HOST_OS and remote_base are still the copy's.
     FREE=0
-  elif ! choose; then
+  elif ! choose && ! back_to_out_host; then
     [ -z "$copied_host" ] || watched "$copied_host" "${SSH[@]}" "$copied_host" "rm -rf '$remote_run'" 2>/dev/null
     rm -f "$files" "$changed" "$left_out"
     if [ -n "$LOW" ]; then
@@ -877,10 +1209,20 @@ while :; do
       echo "Couldn't take the lock on this checkout's copy ($copylock; its folder must be this user's own, mode 700)." >&2
       exit 1
     fi
+    # A path that became a link, or stopped being one, since the mirror was
+    # made (scripts/fix-link-kinds.sh): rsync can't swap those over itself.
+    links=()
+    while IFS= read -r -d '' f; do
+      [ ! -L "$ROOT/$f" ] || links+=("$f")
+    done <"$files"
+    fix_links=":"
+    [ ! -f "$ROOT/scripts/fix-link-kinds.sh" ] \
+      || fix_links="bash -c $(printf '%q' "$(cat "$ROOT/scripts/fix-link-kinds.sh")") _ $(printf '%q ' "$mirror" ${links[@]+"${links[@]}"})"
     # By content (-c), not size and time: an edit that keeps both would
     # otherwise leave the mirror's old copy in the run.
     copy_it() {
       "${SSH[@]}" "$HOST" "umask 022 && mkdir -p '$mirror' '$remote_run' && touch '$mirror' && for d in '$remote_base/mirror' '$mirror' '$remote_run'; do [ -d \"\$d\" ] && [ ! -L \"\$d\" ] && [ -O \"\$d\" ] && chmod go-w \"\$d\" || { echo \"\$d on the check host isn't this account's own\" >&2; exit 1; }; done" \
+        && "${SSH[@]}" "$HOST" "$fix_links" \
         && rsync -azc --from0 --files-from="$files" -e "${SSH[*]}" "$ROOT/" "$HOST:$mirror/" \
         && rsync -a -e "${SSH[*]}" "$files" "$HOST:$remote_run.files" \
         && "${SSH[@]}" "$HOST" "rsync -a --from0 --files-from='$remote_run.files' '$mirror/' '$remote_run/' && rm -f '$remote_run.files'" \
@@ -941,26 +1283,20 @@ while :; do
   # start (Codex's review). One that loses its ssh while waiting for the lock
   # stops as soon as it gets it.
   guarded="$(guarded_cmd "$guard_pid" /bin/bash -c "$inner")"
-  lock="$remote_base/lock"
   # The host's gate (scripts/perf-lock.pl) first, held throughout as the
   # check has the host alone: builds that share the host hold the check lock
   # shared, and macOS grants a shared lock even while this waits for it, so
   # without the gate a stream of overlapping builds would keep a check out.
-  gate="$remote_base/gate"
+  # Then the check lock. scripts/host-turn.sh takes both there, a landing's
+  # check (FIRST) ahead of anything else waiting.
   # A free host is taken without waiting (75 if another check got there
   # first); otherwise this waits for its turn.
   now=0
   [ "$FREE" = 1 ] && [ "$tries" -lt 3 ] && now=1
-  if [ "$HOST_OS" = Linux ]; then
-    # A server that runs its own runner and threads: the check goes in under them.
-    run="nice -n 10 $guarded"
-    if [ "$now" = 1 ]; then remote_cmd="flock -n -E 75 $gate flock -n -E 75 $lock $run"
-    else remote_cmd="flock -n $gate flock -n $lock true 2>/dev/null || echo 'Waiting for another check on $HOST to finish...'; flock $gate flock $lock $run"; fi
-  else
-    run="$guarded"
-    if [ "$now" = 1 ]; then remote_cmd="/usr/bin/lockf -t 0 -k $gate /usr/bin/lockf -t 0 -k $lock $run"
-    else remote_cmd="/usr/bin/lockf -t 0 -k $gate /usr/bin/lockf -t 0 -k $lock true 2>/dev/null || echo 'Waiting for another check on $HOST to finish...'; /usr/bin/lockf -k $gate /usr/bin/lockf -k $lock $run"; fi
-  fi
+  run="$guarded"
+  # A server that runs its own runner and threads: the check goes in under them.
+  [ "$HOST_OS" != Linux ] || run="nice -n 10 $guarded"
+  remote_cmd="/bin/bash '$remote_run/scripts/host-turn.sh' $TURN $([ "$now" = 1 ] && echo now || echo wait) '$remote_base' $id $(single_quoted "$HOST") $(single_quoted "$run")"
 
   # A failed step's log path is on the host: its logs come back here, and the
   # path in the output is changed to match.
@@ -1019,16 +1355,59 @@ while :; do
     tries=$((tries + 1))
     continue
   fi
+  # The lowest the disk went during the run (the sampler --on-host keeps),
+  # else the disk as the failure left it (keep_logs), else as it is now. -s:
+  # a full disk can leave a file empty. Leading zeros go: it's written
+  # padded, so it can be written over in place.
+  fail_kb=""
+  if [ "$code" != 0 ]; then
+    # Both files when there are both, the lower one counting: a disk that
+    # filled between two samples shows in the end's (Codex's review).
+    fail_kb=""
+    for kb in $(watched "$HOST" "${SSH[@]}" "$HOST" "cd '$remote_base' && if [ -s 'kept-$id/min-free-kb' ] || [ -s 'kept-$id/free-kb' ]; then cat 'kept-$id/min-free-kb' 2>/dev/null; echo; cat 'kept-$id/free-kb' 2>/dev/null; echo; else $free_cmd; fi" 2>/dev/null); do
+      case "$kb" in -[0123456789]*) kb=0 ;; esac
+      case "$kb" in ""|*[!0123456789]*) continue ;; esac
+      [ "${#kb}" -le 15 ] || continue
+      kb="$((10#$kb))"
+      if [ -z "$fail_kb" ] || [ "$kb" -lt "$fail_kb" ]; then fail_kb="$kb"; fi
+    done
+  fi
+  # A host that ran out of disk during the check: what failed failed for want
+  # of space, not for anything in what it checks, and counting it as the
+  # landing's would have tb land halve a group and look for a culprit that
+  # isn't there (20 Nov, the cloud box at 0.1 GiB). So it's run again on
+  # another host that can take it, or this one once idle build folders there
+  # are given back if it's the only one.
+  if [ "$code" != 0 ] && ran_out "$fail_kb"; then
+    if [ "$disk_tries" -lt "$DISK_RETRIES" ]; then
+      disk_tries=$((disk_tries + 1))
+      others=""
+      for h in "${HOSTS[@]}"; do
+        case "$h" in -*|""|"$HOST") continue ;; esac
+        case " $SKIP " in *" $h "*) continue ;; esac
+        others+=" $h"
+      done
+      if [ -n "$others" ]; then
+        echo "$HOST ran out of disk during this check (${OUT_GIB} GiB free at the lowest), so what failed there may have failed for want of space. Running it again on another host." >&2
+        # Set aside, not given up: if no other host can take it (a Linux
+        # one for a check that needs a Mac, one that's gone), it's run here
+        # again after all (Codex's and Gemini's reviews).
+        SKIP+=" $HOST"
+        OUT_HOSTS+=" $HOST"
+      else
+        echo "$HOST ran out of disk during this check (${OUT_GIB} GiB free at the lowest), so what failed there may have failed for want of space. Running it again there, after giving back idle build folders." >&2
+        make_room "$HOST" "$remote_base" >/dev/null 2>&1
+      fi
+      watched "$HOST" "${SSH[@]}" "$HOST" "rm -rf '$remote_base/kept-$id' '$remote_run'" 2>/dev/null
+      rm -rf "$local_logs"
+      copied_host=""
+      continue
+    fi
+    DISK_OUT=1
+  fi
   break
 done
 rm -f "$files" "$changed" "$left_out"
-
-# The disk as the failure left it (keep_logs), or as it is now if that couldn't
-# be written. -s: a full disk can leave the file empty.
-fail_kb=""
-if [ "$code" != 0 ]; then
-  fail_kb="$(watched "$HOST" "${SSH[@]}" "$HOST" "cd '$remote_base' && if [ -s 'kept-$id/free-kb' ]; then cat 'kept-$id/free-kb'; else $free_cmd; fi" 2>/dev/null)"
-fi
 
 # find, not a glob: the host's login shell may be zsh, which complains
 # out loud when a glob matches nothing.
@@ -1045,6 +1424,13 @@ if [ -n "$SHOTS" ]; then
 fi
 # Last, so it's the line read: what a full disk breaks often looks nothing like
 # one (a CodeSign error, 7 Nov).
+if [ "${DISK_OUT:-0}" = 1 ]; then
+  # Tried again and out of disk every time: the hosts' trouble, not the
+  # check's, so it ends as one that no host could take (BUSY_EXIT; tb land
+  # then blames none of the landings in it).
+  echo "This check failed because $HOST ran out of disk during it (${OUT_GIB} GiB free at the lowest), not because of anything it checks: each of its $((disk_tries + 1)) tries ran a host out of disk. Free some space there (desktop/scripts/trim-remote-cache.sh gives back idle build folders) and run it again." >&2
+  exit "$BUSY_EXIT"
+fi
 if low_on_room "$fail_kb"; then
   echo "$HOST had only $FREE_GIB GiB free when this failed, and this check wants $MIN_FREE_GIB GiB, which may be why. Free some space there and run it again." >&2
 fi

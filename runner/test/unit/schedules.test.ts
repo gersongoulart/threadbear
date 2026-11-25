@@ -10,7 +10,7 @@ import { ErrorCode, RpcError } from '../../src/protocol.ts';
 import { nullLogger } from '../../src/log.ts';
 import type { CheckResult } from '../../src/schedule-check.ts';
 import { readRunnerJson } from '../../src/config.ts';
-import { convexPoster, toOwnedScheduleDoc, SCHEDULE_POOLS_API_VERSION } from '../../src/sync.ts';
+import { convexPoster, toOwnedScheduleDoc, SCHEDULE_POOLS_API_VERSION, SCHEDULE_PROVIDER_API_VERSION } from '../../src/sync.ts';
 import { keptCheckFile } from '../../src/schedule-check.ts';
 import { dropScheduled, scheduledSendMethods, sendScheduled } from '../../src/handover.ts';
 import { DRAIN_MAX_OLD_MS, DRAIN_SETTLE_MS } from '../../src/runner.ts';
@@ -260,7 +260,9 @@ test('a new keyed send searches recent events and legacy sends do not scan histo
   const h = makeHarness();
   const { thread } = idleThread(h);
   const st = h.runner.mustGet(thread.id);
-  for (let i = 0; i < 1024; i++) h.runner.emit(st, { type: 'system.note', text: 'Earlier work' });
+  // More than one 128-event page of old history, so a full scan would read twice.
+  // Kept small: each emit writes to disk, and 1024 took 88 s on Windows CI.
+  for (let i = 0; i < 200; i++) h.runner.emit(st, { type: 'system.note', text: 'Earlier work' });
   h.clock.advance(10 * MIN);
   const log = h.store.log(thread.id);
   const read = log.read.bind(log);
@@ -886,6 +888,45 @@ test('a new-thread schedule can run on a pool instead of one login', async () =>
   sched.stop();
 });
 
+// A pool of Claude and OpenCode logins (Mike, 21 Nov): the picker lists
+// each kind's models under its own heading, and a schedule keeps the one
+// picked under, as a new thread does (threads.create's provider).
+test("a schedule on a pool of several kinds keeps the kind its model was picked under", async () => {
+  const { h, sched } = setup();
+  const m = scheduleMethods(sched);
+  const made: { poolId?: string; provider?: string; model?: string }[] = [];
+  const create = h.runner.create.bind(h.runner);
+  h.runner.create = (p) => {
+    made.push({ poolId: p.poolId, provider: p.provider, model: p.model });
+    return create(p);
+  };
+  await assert.rejects(async () => m['schedules.create']({ text: 'x', cron: '@daily', provider: 'codex' }), /provider is for a schedule with a poolId/);
+  await assert.rejects(async () => m['schedules.create']({ text: 'x', cron: '@daily', poolId: 'claude', provider: 'nope' }), /provider must be one of/);
+
+  const sc = ((await m['schedules.create']({ text: 'Draft the standup', cron: '@daily', poolId: 'claude', provider: 'codex', model: 'gpt-6' })) as { schedule: { id: string; provider?: string } }).schedule;
+  assert.equal(sc.provider, 'codex');
+  await sched.runNow(sc.id);
+  assert.deepEqual(made.at(-1), { poolId: 'claude', provider: 'codex', model: 'gpt-6' });
+
+  // A new model without a kind is the model's kind again, never one kind's
+  // model sent to another's login; picking both together keeps it.
+  assert.equal((await sched.update({ scheduleId: sc.id, model: 'opus' })).provider, undefined);
+  assert.equal((await sched.update({ scheduleId: sc.id, model: 'gpt-6', provider: 'codex' })).provider, 'codex');
+  assert.equal((await sched.update({ scheduleId: sc.id, title: 'Standup' })).provider, 'codex', 'other changes leave it');
+  assert.equal(((await m['schedules.update']({ scheduleId: sc.id, provider: null })) as { schedule: { provider?: string } }).schedule.provider, undefined);
+  await sched.update({ scheduleId: sc.id, provider: 'codex' });
+  assert.equal((await sched.update({ scheduleId: sc.id, accountId: 'claude-3' })).provider, undefined, 'a login has its own kind');
+  await assert.rejects(sched.update({ scheduleId: sc.id, provider: 'codex' }), /provider is for a schedule with a poolId/);
+  await sched.runNow(sc.id);
+  assert.equal(made.at(-1)?.provider, undefined, 'pinned to a login, no kind is sent');
+
+  // A backend older than 97 would turn the whole row down.
+  const row = { ...sched.find(sc.id), poolId: 'claude', provider: 'codex' as const, runnerId: 'r1' };
+  assert.equal(toOwnedScheduleDoc(row, SCHEDULE_PROVIDER_API_VERSION).provider, 'codex');
+  assert.ok(!('provider' in toOwnedScheduleDoc(row, SCHEDULE_PROVIDER_API_VERSION - 1)));
+  sched.stop();
+});
+
 test('the methods check what they are given', async () => {
   const { h, sched } = setup();
   const m = scheduleMethods(sched);
@@ -1138,6 +1179,9 @@ test('a due run is claimed, so two runner processes under one id send it once', 
   await old.attach(b.for('laptop-old', LAPTOP.id));
   await now.attach(b.for('laptop-new', LAPTOP.id));
   const sc = await now.create({ text: 'Check CI', at: iso(h.clock.now() + 10 * MIN), threadId: thread.id });
+  // A real handover's two runners share one data dir, and so its schedule
+  // ceilings (schedules.ts, "Ceilings"); the two homes here don't.
+  fs.copyFileSync(path.join(h.home, 'new', 'schedule-ceilings.json'), path.join(h.home, 'old', 'schedule-ceilings.json'));
   await tick();
   h.clock.advance(10 * MIN);
   for (let i = 0; i < 5; i++) await tick();

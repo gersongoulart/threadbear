@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import type { AgentAdapter } from '../../src/adapters/types.ts';
 import { normaliseRecord } from '../../src/store.ts';
 import { makeHarness, tick } from '../helpers/fakes.ts';
@@ -10,7 +11,7 @@ import { makeHarness, tick } from '../helpers/fakes.ts';
 function harness() {
   const h = makeHarness();
   fs.writeFileSync(path.join(h.home, 'runner.json'), JSON.stringify({ experiments: { conversationForks: true } }));
-  const calls: unknown[] = [];
+  const calls: Parameters<NonNullable<AgentAdapter['forkSession']>>[0][] = [];
   (h.adapter as AgentAdapter).forkSession = async (request) => {
     calls.push(request);
     return { sessionId: crypto.randomUUID() };
@@ -51,7 +52,7 @@ test('message fork stops displayed and native history at the selected completed 
   const events = h.runner.events(thread.id).events;
   assert.ok(events.some((e) => e.type === 'assistant.text' && e.text === 'I remember apricot.'));
   assert.ok(!JSON.stringify(events).includes('banana'));
-  assert.deepEqual((h.calls[0] as any).through, { userMessageId: user.turnId, assistantItemId: 'answer' });
+  assert.deepEqual(h.calls[0]!.through, { userMessageId: user.turnId, assistantItemId: 'answer' });
   assert.equal(h.runner.mustGet(thread.id).rec.forkedFrom?.seq, end.seq);
   assert.deepEqual(h.runner.events(id).events, source);
   h.runner.flush();
@@ -120,7 +121,7 @@ test('synthetic end-turn replies resolve to the underlying tool result boundary'
   const turn = st.rec.lastTurnCompletedSeq;
   const end = h.runner.events(id).events.find(e => e.seq === turn)!;
   await h.runner.forkThread(id, { workspace: 'same', requestId: crypto.randomUUID(), throughTurnId: end.turnId });
-  assert.deepEqual((h.calls[0] as any).through, { userMessageId: end.turnId, toolResultId: 'toolu-end' });
+  assert.deepEqual(h.calls[0]!.through, { userMessageId: end.turnId, toolResultId: 'toolu-end' });
 });
 
 test('fork copies history into an idle independent session and resumes after restart without new spend', async () => {
@@ -319,4 +320,45 @@ test('a failed first child turn retells the destination identity', async () => {
   h.runner.send(thread.id, 'try again');
   await tick();
   assert.ok(h.adapter.last.sent.at(-1)?.text.includes(`Your thread ID is ${thread.id}`));
+});
+
+
+test('a thread waiting on a turn hold cannot fork its saved session', async () => {
+  const h = harness(), id = finished(h);
+  h.runner.mustGet(id).rt.holds = new Set(['token']);
+  assert.equal((await h.runner.forkInfo(id)).available, false);
+  await assert.rejects(h.runner.forkThread(id, { workspace: 'same', requestId: crypto.randomUUID() }), /idle|finish/i);
+});
+
+test('a thread in a slot lent elsewhere cannot fork stale workspace files', async () => {
+  const h = harness(), id = finished(h);
+  h.runner.lentFolder = async () => ({ slot: h.home, main: h.home, went: 'was lent to another borrower' });
+  assert.equal((await h.runner.forkInfo(id)).available, false);
+  await assert.rejects(h.runner.forkThread(id, { workspace: 'same', requestId: crypto.randomUUID() }), /folder|resume/i);
+});
+
+
+test('a separate worktree fork inherits its source patch trust hold before setup and after restart', async () => {
+  const h = harness(), id = finished(h);
+  const git = (cwd: string, args: string[], input?: string) => execFileSync('git', args, { cwd, input, encoding: 'utf8' }).trim();
+  const bare = path.join(h.home, 'objects.git');
+  fs.mkdirSync(bare);
+  git(bare, ['init', '--bare', '--initial-branch=main']);
+  const blob = git(bare, ['hash-object', '-w', '--stdin'], 'original\n');
+  const tree = git(bare, ['mktree'], `100644 blob ${blob}\tfile.txt\n`);
+  const commit = git(bare, ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit-tree', tree], 'base\n');
+  const cwd = path.join(h.home, 'source');
+  git(bare, ['worktree', 'add', '--detach', cwd, commit]);
+  const source = h.runner.mustGet(id).rec;
+  source.cwd = cwd;
+  source.worktree = { repo: 'source', path: cwd, mainCheckout: cwd, branch: 'source', base: commit, movedIn: true };
+  const held: string[] = [];
+  h.runner.patchTrust = { ...h.runner.patchTrust, isUnvouched: (dir) => dir === cwd, unvouch: (dir) => held.push(dir) };
+  const { thread } = await h.runner.forkThread(id, { workspace: 'worktree', requestId: crypto.randomUUID() });
+  const child = h.runner.mustGet(thread.id).rec;
+  assert.equal(child.worktree?.unvouched, true, 'persist the hold for trust-list reconstruction');
+  assert.deepEqual(held, [child.worktree!.path], 'hold the new path before loading any patch');
+  h.runner.flush();
+  const next = h.restart();
+  assert.equal(next.runner.mustGet(thread.id).rec.worktree?.unvouched, true);
 });

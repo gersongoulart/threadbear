@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import type { Runner, ThreadState } from '../runner.ts';
-import { newRuntime } from '../runner.ts';
+import { newRuntime } from './runtime.ts';
 import type { RunnerPart } from './part.ts';
 import type { ThreadRecord } from '../store.ts';
 import { cutOut } from '../store.ts';
@@ -14,6 +14,7 @@ import { forkWorkspaceInfo, makeForkWorkspace, type ForkWorkspaceInfo } from '..
 import { findWorktreePatch } from '../patches.ts';
 import { worktreeInstructions } from '../worktrees.ts';
 import { cutSafely } from '../safe-cut.ts';
+import { runningSession } from '../cli-session.ts';
 
 export type ForkOptions = { workspace: 'same' | 'worktree'; requestId: string; throughTurnId?: string };
 export type ForkInfo = { available: boolean; reason?: string; workspace?: ForkWorkspaceInfo };
@@ -25,7 +26,7 @@ function unavailable(runner: Runner, st: ThreadState): string | undefined {
   if (!experimentOn(runner.cfg.home, 'conversationForks')) return 'Conversation forks are turned off in Settings > General > Experiments.';
   if (runner.boxThread !== undefined) return 'A virtual runner can only host its assigned thread.';
   if (!runner.adapters[rec.provider]?.forkSession) return 'This provider does not support conversation forks.';
-  if (rt.forking || rt.editing || rt.moving || rt.turn || rt.tasks.length || rt.runningActions?.size || rt.hooksRunning || rt.cleaning || rt.preparing || rt.wakeTimer || rec.subagents?.some((a) => a.status === 'running') || rec.queue.length || rec.pendingApprovals.length || rt.approvals.size || ['starting', 'running', 'waiting'].includes(rec.status)) return 'Wait for this thread to finish and become idle before forking.';
+  if (rt.holds?.size || rt.forking || rt.editing || rt.moving || rt.turn || rt.tasks.length || rt.runningActions?.size || rt.hooksRunning || rt.cleaning || rt.preparing || rt.wakeTimer || rec.subagents?.some((a) => a.status === 'running') || rec.queue.length || rec.pendingApprovals.length || rt.approvals.size || ['starting', 'running', 'waiting'].includes(rec.status)) return 'Wait for this thread to finish and become idle before forking.';
   if (runner.worktreeCleanup(st)) return 'This shared worktree is being cleaned up. Try again when it is idle.';
   if (rec.copied || rec.sample || !rec.sessionUsed || !rec.nativeSessionId || rec.handoff || rec.resumeAt || !rec.lastTurnCompletedSeq) return 'This thread has no complete saved native session to fork.';
   if (runner.leavesRemovedWorktree(rec)) return 'This thread’s worktree has been removed. Resume it before forking.';
@@ -155,6 +156,7 @@ export const forksPart = {
     const st = this.mustGet(threadId);
     const reason = unavailable(this, st);
     if (reason) return { available: false, reason };
+    if (await this.lentFolder(st.rec)) return { available: false, reason: 'This thread’s folder was lent elsewhere. Resume it before forking.' };
     forkBoundary(this, st.rec, throughTurnId);
     const workspace = st.rec.confined ? undefined : await forkWorkspaceInfo(st.rec.cwd);
     return { available: true, ...(workspace ? { workspace } : {}) };
@@ -191,6 +193,7 @@ export const forksPart = {
     }
     const source = this.mustGet(threadId);
     const { rec, rt } = source;
+    if (await this.lentFolder(rec)) throw new RpcError(ErrorCode.busy, 'This thread’s folder was lent elsewhere. Resume it before forking.');
     const reason = unavailable(this, source);
     if (reason) throw new RpcError(ErrorCode.busy, reason);
     const through = forkBoundary(this, rec, options.throughTurnId);
@@ -208,9 +211,18 @@ export const forksPart = {
     try {
       // Flush native transcript writes and prevent unsolicited traffic while
       // the snapshot is read. No turn or background task is interrupted.
-      if (rt.session) this.releaseSession(source);
+      if (runningSession(rt)) this.releaseSession(source);
       while (rt.closing) await rt.closing;
-      if (options.workspace === 'worktree') workspace = await makeForkWorkspace(rec.cwd, childId);
+      if (options.workspace === 'worktree') {
+        workspace = await makeForkWorkspace(rec.cwd, childId);
+        // A copied branch is still the moved-in source's work. Hold its
+        // new path before patch lookup/setup, and retain the mark so a
+        // missing trust list cannot restore always-trust after restart.
+        if (rec.worktree?.unvouched || this.patchTrust.isUnvouched?.(rec.cwd)) {
+          workspace.worktree.unvouched = true;
+          this.patchTrust.unvouch?.(workspace.worktree.path);
+        }
+      }
       const destinationCwd = workspace?.cwd ?? rec.cwd;
       fs.mkdirSync(stage, { recursive: true });
       copyFiles(this.store.mediaDir(rec.id), path.join(stage, 'media'));

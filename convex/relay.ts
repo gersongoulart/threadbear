@@ -1,19 +1,19 @@
 // Other runners' threads read and steered through the backend (API 44,
-// docs/protocol.md "Other runners' threads through the backend"): the main
+// docs/protocol/runners.md "Other runners' threads through the backend"): the main
 // Mac's runner reads another runner's thread from its messages and threads
 // rows, and asks that runner to act on it with a `commands` row, as the
 // phone does. The Mac app talks only to its own runner; runners never talk
 // to each other. All owner only (runnerAccess.ts ACCESS): a runner key
 // can't read another runner's threads or queue work for it.
 //
-// Read rules (docs/full-convex.md): the live tail is a few rows, older pages
+// Read rules (docs/convex-backend.md, "Read rules"): the live tail is a few rows, older pages
 // are read once and kept on the runner, a thread's row is one document, and
 // a command's state is one get by id.
 import { ConvexError, v } from 'convex/values';
 import type { OrderedQuery } from 'convex/server';
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server';
 import type { DataModel, Doc, Id } from './_generated/dataModel';
-import { checkRunnerId, forbidden, isSeq, MAX_SEQ, pageLimit, runnerAuth, sha256, withoutCredentials } from './lib';
+import { checkRunnerId, forbidden, isSeq, MAX_SEQ, ownerFenced, pageLimit, runnerAuth, sha256, withoutCredentials } from './lib';
 import { docBytes, isThreadId, mayTouch, ownThreadOnly } from './runnerAccess';
 import { queued, request as requestMachine } from './machines';
 import { requestStateFrom } from './requestStates';
@@ -50,11 +50,14 @@ const relayRow = v.object({
   // The asks a user's message answered (API 89), so another Mac draws them
   // as answers.
   answers: v.optional(v.array(v.object({ action: v.string(), answer: v.string() }))),
+  // Why the runner sent its own message (API 98), so another Mac heads its
+  // note as that runner's own Mac does.
+  wakeReason: v.optional(v.string()),
   at: v.string(),
 });
 
 type Button = { id: string; title: string; kind: 'start' | 'send'; target?: string; pressedThreadId?: string; failed?: string };
-type Row = { seq: number; role: 'user' | 'assistant' | 'tool' | 'note'; text: string; origin?: string; toolKind?: string; summary?: boolean; plan?: boolean; planDecision?: 'go' | 'revise'; turn?: string; wokeBy?: { kind: string; description: string }[]; buttons?: Button[]; pictures?: number; answers?: { action: string; answer: string }[]; at: string };
+type Row = { seq: number; role: 'user' | 'assistant' | 'tool' | 'note'; text: string; origin?: string; toolKind?: string; summary?: boolean; plan?: boolean; planDecision?: 'go' | 'revise'; turn?: string; wokeBy?: { kind: string; description: string }[]; buttons?: Button[]; pictures?: number; answers?: { action: string; answer: string }[]; wakeReason?: string; at: string };
 function toRow(m: Row): Row {
   return {
     seq: m.seq,
@@ -73,6 +76,7 @@ function toRow(m: Row): Row {
     // Only a count a message could have: a runner key writes what it likes.
     ...(m.role === 'user' && Number.isSafeInteger(m.pictures) && m.pictures! >= 1 && m.pictures! <= 999 ? { pictures: m.pictures } : {}),
     ...(m.role === 'user' && m.answers?.length ? { answers: m.answers } : {}),
+    ...(m.role === 'user' && m.origin === 'runner' && m.wakeReason ? { wakeReason: m.wakeReason } : {}),
     at: m.at,
   };
 }
@@ -206,7 +210,7 @@ export const remoteThread = query({
     const t = await ctx.db.query('threads').withIndex('by_threadId', (q) => q.eq('threadId', threadId)).unique();
     if (!t) return null;
     // The secret card's key stays: the runner seals an answer to it, as the phone does.
-    const { _id, _creationTime, pushedAt: _p, pushHeldAt: _h, ...rest } = t;
+    const { _id, _creationTime, pushedAt: _p, pushHeldAt: _h, alertedAt: _a, ...rest } = t;
     return rest;
   },
 });
@@ -575,7 +579,7 @@ export const remoteAccounts = query({
 
 // ------------------------------------------------------------ requests
 // A runner on a runner key asking for a new thread on another runner
-// (docs/protocol.md, "Asking another runner"; schema.ts runnerRequests). It
+// (docs/protocol/runners.md, "Asking another runner"; schema.ts runnerRequests). It
 // files the request here and shows a card in its own thread; the main Mac's
 // app reads the request back through its runner, shows Mike all of it, and
 // on Allow its runner (the owner key) starts the thread and marks the row.
@@ -737,7 +741,10 @@ export const closeRequest = mutation({
   handler: async (ctx, { key, requestId }) => {
     const caller = await runnerAuth(ctx, key, 'closeRequest');
     const r = await ctx.db.query('runnerRequests').withIndex('by_requestId', (q) => q.eq('requestId', requestId)).first();
-    if (!r || (!caller.owner && r.runnerId !== caller.runnerId) || !ownThreadOnly(caller, r.threadId)) throw new ConvexError({ kind: 'notFound', message: 'no such request' });
+    // The asking runner's alone: the owner key files none, and doesn't close
+    // one of a runner with a live key of its own (lib.ts ownerFenced; Mike's
+    // no is decideRequest's).
+    if (!r || (!caller.owner && r.runnerId !== caller.runnerId) || !ownThreadOnly(caller, r.threadId) || (await ownerFenced(ctx, caller, r.runnerId))) throw new ConvexError({ kind: 'notFound', message: 'no such request' });
     // Only one nobody has started: a claimed one may be starting now.
     if (r.state !== 'pending') return null;
     if (steppingFor('requestState')) await asBefore(ctx, r, { state: 'closed', decidedAt: Date.now() });

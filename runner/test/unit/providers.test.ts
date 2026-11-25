@@ -80,7 +80,7 @@ test('a saved pool of only an agent this runner does not offer is gone', () => {
 test('hello lists each provider this runner offers', () => {
   assert.deepEqual(providersForHello().map((p) => p.id), [...PROVIDERS]);
   const h = makeHarness(undefined, {}, { accounts: new FakeAccounts(withCodex()) });
-  assert.deepEqual(h.runner.hello().providers.map((p) => p.name), ['Claude', 'Codex', 'Cursor', 'OpenCode', 'Grok']);
+  assert.deepEqual(h.runner.hello().providers.map((p) => p.name), ['Claude', 'Codex', 'Cursor', 'OpenCode', 'Grok', 'Gemini']);
 });
 
 test('what Grok can do', () => {
@@ -91,7 +91,8 @@ test('what Grok can do', () => {
   assert.equal(g.effort, 'codex');
   assert.equal(g.autoMode, 'asks');
   assert.equal(g.smallJobs, true, 'its hook denies every tool for one');
-  for (const can of [g.rewind, g.usageReadings]) assert.equal(can, false);
+  assert.equal(g.rewind, false);
+  assert.equal(g.usageReadings, true, 'its plan share, from _x.ai/billing');
 });
 
 test('a Grok thread takes an effort its model lists, and not one it does not', () => {

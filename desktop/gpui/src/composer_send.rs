@@ -1,14 +1,24 @@
-// Right-clicking Send to send the message later, as Mail and Slack do
-// (ComposerControls.swift, the `iconContextMenu` on SendButton): Schedule…
-// opens the schedule editor with what's in the box, as "+" > Schedule… does.
-// Not on another Mac's thread, or a new one for another Mac: their schedules
-// are made from there.
+// Sending the message later, as Mail and Slack do: the arrow beside Send,
+// and right-clicking Send (ComposerControls.swift, the `iconContextMenu` on
+// SendButton), offer tonight at 9 pm, tomorrow at 9 am and the next known
+// token reset (threadbear_core::send_later), each opening the schedule
+// editor on Once at that time, and Schedule… for any other, as "+" >
+// Schedule… does. Not on another Mac's thread, or a new one for another
+// Mac: their schedules are made from there.
+use crate::a11y::A11yRole as _;
 use crate::composer::Composer;
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
+use crate::tips::Tip as _;
+use gpui_kit::assets::IconName;
+use gpui_kit::base::TestSupportExt as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_kit::component::{h_flex, Icon, Sizable as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use threadbear_core::chrono::Local;
+use threadbear_core::send_later::{self, Preset};
 
-/// Its one item, as the Swift menu names it.
+/// The menu's last item, as the Swift menu names it.
 pub(crate) const SCHEDULE_TITLE: &str = "Schedule…";
 
 /// What the send button's states are called to VoiceOver and to a script
@@ -17,33 +27,127 @@ pub(crate) const SCHEDULE_TITLE: &str = "Schedule…";
 const SEND_BUTTON_NAMES: [&str; 4] = ["Send", "Stop", "Stopping", "Starting the thread"];
 
 impl Composer {
-    /// Whether Send's right-click has Schedule… in it: the runner keeps
-    /// schedules, and the box's thread (or new one) is on this Mac's.
+    /// Whether Send offers to send later: the runner keeps schedules, and
+    /// the box's thread (or new one) is on this Mac's.
     pub(crate) fn schedules_from_send(&self, cx: &App) -> bool {
-        self.chip_data(cx).away.is_none() && self.app.upgrade().is_some_and(|a| a.read(cx).schedules_supported)
+        self.chip_data(cx).away.is_none()
+            && self
+                .app
+                .upgrade()
+                .is_some_and(|a| a.read(cx).schedules_supported)
+    }
+
+    /// The next known reset of the box's login, or of its pool's logins of
+    /// the box's kind, plus a minute.
+    fn token_reset_at(&self, cx: &App) -> Option<i64> {
+        let data = self.chip_data(cx);
+        let s = data.summary.as_ref()?;
+        let provider = if s.provider.is_empty() {
+            "claude"
+        } else {
+            s.provider.as_str()
+        };
+        send_later::token_reset(
+            &data.logins,
+            &s.account_id,
+            s.pool_id.as_deref(),
+            provider,
+            crate::now_ms(),
+        )
     }
 
     /// The send button (or Stop, or a spinner, as it stands) with its
-    /// right-click menu, when there's something for it to offer.
+    /// right-click menu and the arrow beside it, when there's something
+    /// for them to offer.
     pub(crate) fn with_send_menu(&self, button: AnyElement, cx: &mut Context<Self>) -> AnyElement {
         if !self.schedules_from_send(cx) {
             return button;
         }
         let composer = cx.entity().downgrade();
-        div()
-            .id("composer-send-menu")
+        let for_arrow = composer.clone();
+        let tip = "Send later: tonight, tomorrow or when tokens reset";
+        let arrow = Button::new("composer-send-later-button")
+            // As quiet as the chips' arrows beside it, not the full white
+            // a ghost button's icon takes.
+            .icon(Icon::from(IconName::ChevronDown).text_color(crate::style::quiet_text(cx)))
+            .small()
+            .ghost()
+            .dropdown_menu(move |menu: PopupMenu, _, cx| send_menu(menu, &for_arrow, cx));
+        h_flex()
             .flex_none()
-            .child(button)
-            .context_menu(move |menu, _, _| {
-                let composer = composer.clone();
-                menu.item(PopupMenuItem::new(SCHEDULE_TITLE).icon(crate::icons::symbol("clock")).on_click(move |_, window, cx| {
-                    let Some(composer) = composer.upgrade() else { return };
-                    let Some(app) = composer.read(cx).app.upgrade() else { return };
-                    app.update(cx, |app, cx| app.new_schedule_from_composer(&composer, window, cx));
-                }))
-            })
+            .items_center()
+            .child(
+                div()
+                    .id("composer-send-menu")
+                    .flex_none()
+                    .child(button)
+                    .context_menu(move |menu, _, cx| send_menu(menu, &composer, cx)),
+            )
+            .child(
+                div()
+                    .id("composer-send-later")
+                    .flex_none()
+                    .test_support()
+                    .a11y_role(Role::GenericContainer)
+                    .aria_label("Send later")
+                    .child(arrow)
+                    .tip(tip),
+            )
             .into_any_element()
     }
+}
+
+/// The quick times, then Schedule…, for the arrow and the right-click alike.
+fn send_menu(menu: PopupMenu, composer: &WeakEntity<Composer>, cx: &mut App) -> PopupMenu {
+    let Some(c) = composer.upgrade() else {
+        return menu;
+    };
+    let reset = c.read(cx).token_reset_at(cx);
+    let mut menu = menu;
+    for choice in send_later::choices(&Local::now(), reset) {
+        let composer = composer.clone();
+        let preset = choice.preset;
+        menu = menu.item(
+            PopupMenuItem::new(choice.title)
+                .icon(crate::icons::symbol("clock"))
+                .disabled(choice.at.is_none())
+                .on_click(move |_, window, cx| {
+                    let Some(c) = composer.upgrade() else {
+                        return;
+                    };
+                    // Worked out again as it's picked: a menu can stay up
+                    // past 9 pm, midnight or a reset.
+                    let now = Local::now();
+                    let at = match preset {
+                        Preset::Tonight => send_later::tonight(&now),
+                        Preset::Tomorrow => send_later::tomorrow(&now),
+                        Preset::TokenReset => c.read(cx).token_reset_at(cx),
+                    };
+                    let Some(app) = c.read(cx).app.upgrade() else {
+                        return;
+                    };
+                    app.update(cx, |app, cx| {
+                        app.new_schedule_from_composer_at(&c, at, window, cx)
+                    });
+                }),
+        );
+    }
+    let composer = composer.clone();
+    menu.separator().item(
+        PopupMenuItem::new(SCHEDULE_TITLE)
+            .icon(crate::icons::symbol("clock"))
+            .on_click(move |_, window, cx| {
+                let Some(composer) = composer.upgrade() else {
+                    return;
+                };
+                let Some(app) = composer.read(cx).app.upgrade() else {
+                    return;
+                };
+                app.update(cx, |app, cx| {
+                    app.new_schedule_from_composer(&composer, window, cx)
+                });
+            }),
+    )
 }
 
 /// The automation's `composer-menu` for `send` (both apps): a right-click on
@@ -51,27 +155,36 @@ impl Composer {
 /// has built the menu, its items read back, or one of them pressed with
 /// `click`. A command's turn each, as each waits on the one before to be drawn.
 #[cfg(feature = "automation")]
-pub(crate) async fn menu_command(window: AnyWindowHandle, cmd: &serde_json::Value, cx: &mut AsyncApp) -> Result<serde_json::Value, String> {
+pub(crate) async fn menu_command(
+    window: AnyWindowHandle,
+    cmd: &serde_json::Value,
+    cx: &mut AsyncApp,
+) -> Result<serde_json::Value, String> {
     use gpui_kit::test::{TestEventExt as _, TestQueryExt as _, TestWindowExt as _};
     use serde_json::json;
-    let pressed = cx
-        .update_window(window, |_, window, cx| {
-            crate::thread::scripted_input(|| {
-                window.render_frame(cx);
-                // The send button, Stop or the spinner: whichever is showing,
-                // by the name each has for VoiceOver.
-                let found = window.elements().into_iter().find(|e| e.visible() && e.label().is_some_and(|l| SEND_BUTTON_NAMES.contains(&l)));
-                let Some(button) = found else { return Err("no send button on screen".to_owned()) };
-                let at = button.visible_bounds().center();
-                window.pointer_move(at, None, cx);
-                window.pointer_down(at, MouseButton::Right, cx);
-                window.pointer_up(at, MouseButton::Right, cx);
-                Ok(())
-            })
+    cx.update_window(window, |_, window, cx| {
+        crate::thread::scripted_input(|| {
+            window.render_frame(cx);
+            // The send button, Stop or the spinner: whichever is showing,
+            // by the name each has for VoiceOver.
+            let found = window
+                .elements()
+                .into_iter()
+                .find(|e| e.visible() && e.label().is_some_and(|l| SEND_BUTTON_NAMES.contains(&l)));
+            let Some(button) = found else {
+                return Err("no send button on screen".to_owned());
+            };
+            let at = button.visible_bounds().center();
+            window.pointer_move(at, None, cx);
+            window.pointer_down(at, MouseButton::Right, cx);
+            window.pointer_up(at, MouseButton::Right, cx);
+            Ok(())
         })
-        .map_err(|e| e.to_string())??;
-    let () = pressed;
-    cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+    })
+    .map_err(|e| e.to_string())??;
+    cx.background_executor()
+        .timer(std::time::Duration::from_millis(150))
+        .await;
     let items = cx
         .update_window(window, |_, window, cx| {
             window.render_frame(cx);
@@ -79,7 +192,9 @@ pub(crate) async fn menu_command(window: AnyWindowHandle, cmd: &serde_json::Valu
         })
         .map_err(|e| e.to_string())?;
     if let Some(title) = cmd["click"].as_str() {
-        let Some((_, item)) = items.iter().find(|(t, _)| t == title) else { return Err(format!("no item {title} in {items:?}")) };
+        let Some((_, item)) = items.iter().find(|(t, _)| t == title) else {
+            return Err(format!("no item {title} in {items:?}"));
+        };
         let at = item.center();
         cx.update_window(window, |_, window, cx| {
             crate::thread::scripted_input(|| {
@@ -94,7 +209,11 @@ pub(crate) async fn menu_command(window: AnyWindowHandle, cmd: &serde_json::Valu
     let titles: Vec<&str> = items.iter().map(|(t, _)| t.as_str()).collect();
     // Left up for a picture with `keep: true`; put away otherwise.
     if !titles.is_empty() && cmd["keep"].as_bool() != Some(true) {
-        cx.update_window(window, |_, window, cx| window.press("escape", cx)).map_err(|e| e.to_string())?;
+        cx.update_window(window, |_, window, cx| window.press("escape", cx))
+            .map_err(|e| e.to_string())?;
     }
-    Ok(json!(format!("ok {}", serde_json::to_string(&titles).unwrap_or_default())))
+    Ok(json!(format!(
+        "ok {}",
+        serde_json::to_string(&titles).unwrap_or_default()
+    )))
 }

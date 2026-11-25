@@ -53,6 +53,10 @@ Then('the {word} panel is closed', async function (this: ThreadbearWorld, name: 
   await this.until(`the ${name} panel gone`, (d) => d[panelKey(name)]?.shown === false);
 });
 
+Then('the {word} panel is a tab behind another', async function (this: ThreadbearWorld, name: string) {
+  await this.until(`the ${name} panel docked behind another tab`, (d) => d[panelKey(name)]?.docked === true && d[panelKey(name)]?.shown === false);
+});
+
 Then('the {word} panel lists {string}', async function (this: ThreadbearWorld, name: string, line: string) {
   await this.until(`"${line}" in the ${name} panel`, (d) => d[panelKey(name)]?.lines.includes(line));
 });
@@ -63,7 +67,7 @@ When('I press {string} in the {word} panel', async function (this: ThreadbearWor
 });
 
 // What the mock runner says about the gateway and its own update
-// (mock.connectors and mock.updates, app/Tools/mock-runner/server.mjs).
+// (mock.connectors and mock.updates, mock-runner/server.mjs).
 
 When("the gateway can't be reached", async function (this: ThreadbearWorld) {
   await this.app.do({ cmd: 'mock', method: 'connectors', params: { state: 'unreachable', error: 'timed out' } });

@@ -57,6 +57,7 @@ Each scenario starts its own app on its own mock runner, about 6 seconds apiece.
 ```bash
 npm ci                                  # once, in this folder
 npm run check                           # steps line up, no apps needed
+npm run typecheck                       # the steps, support and tools (tsconfig.json)
 
 # Build the app first, then:
 TB_APP=gpui  node_modules/.bin/cucumber-js        # or swift
@@ -85,6 +86,31 @@ Use `TB_REAL_SCREEN=1` only on Tinker Desk through `remote.sh --desk`, with
 no recording running there. Never run them on the Mac Mike is using. The
 picture-promise case starts its own source window and checks it is in front
 before dragging into its own test app.
+
+### Real screen
+
+Anything needing the real pointer, keys or a window in front (AGENTS.md,
+"Tests that need the real screen") runs on Tinker Desk's desktop from a
+throwaway copy, through `ssh tinker-desk '~/.local/bin/desk "<cmd>"'`, and the
+copy is removed after. Debug apps on Mike's Mac are kept behind everything, so
+there stick to `dev-app.sh`'s automation commands.
+
+- Trackpad gestures: made-up events handed to a handler never meet a scroll
+  view, and a scroll view that gets any of a gesture takes the rest itself, so
+  swipes passed every test and failed on Mike's trackpad twice (7 Nov).
+  `features/tools/post-gesture.swift` sends them through the window server.
+- A scripted drag starts from a window of your own. It can't start from a
+  screenshot's floating thumbnail, so that one still takes a person.
+- Someone else may be using that desktop: first check nothing's recording it
+  (the `recording()` guard in `tools/real-screen.ts` checks executable names,
+  including variants) and that your window really is in front (`front`, then
+  a look at the screen). Wake its screen with `caffeinate -u`, or the events go
+  nowhere.
+- A spec or tool that installs the web runtime puts it in `runtimeParent()`
+  (`support/web-runtime.ts`), never straight in the temp folder: remote.sh's
+  temp folder is on Tinker Desk's external SSD, and Chromium's helpers run from
+  there asked macOS for that disk on every new build, with nobody at the screen
+  to answer (19 Nov).
 
 `tools/idle-perf.ts` measures the app process's CPU time and wakeups on Tinker
 Desk, without polling the app during the interval. GPUI builds with the thread
@@ -234,7 +260,9 @@ workspace and built-in art inputs inside the final lock, so an unchanged
 checkout cannot reuse the other checkout's binary. The marker returns only
 after Cargo succeeds. A cleanup that cannot yet observe killed work stopping
 keeps the host locked and writes `~/.cache/threadbear-check/perf-cleanup.log`
-after 30 seconds; it does not let another measurement start over that work.
+after 30 seconds; it does not let another measurement start over work it
+knows of. Only when every process it knows of is gone and lsof alone can't
+confirm the rest does it give up, after 10 minutes, and unlock.
 
 ## Hunting bugs on purpose
 

@@ -4,6 +4,7 @@
 // and what isn't an address is its words.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { classifyLink } from './link-policy.ts';
 
 const BASE = 'https://threadbear.example/t/abc';
@@ -40,4 +41,28 @@ test('what runs in the page or reads files is never a link', () => {
 test("an address too long to show whole isn't a link", () => {
   assert.equal(classifyLink('https://example.com/' + 'a'.repeat(3000), BASE).kind, 'never');
   assert.equal(classifyLink('slack://open?x=' + 'a'.repeat(3000), BASE).kind, 'never');
+});
+
+// The cases the desktop, iPhone and Android apps run too
+// (shared/cases/link-policy.json): never is refuse there.
+test('links follow the shared cases', () => {
+  type Case = { name: string; input: string; expect: 'web' | 'ask' | 'file' | 'refuse'; differs?: Record<string, string> };
+  const file = new URL('../../shared/cases/link-policy.json', import.meta.url);
+  const { cases } = JSON.parse(readFileSync(file, 'utf8')) as { cases: Case[] };
+  assert.ok(cases.length >= 40);
+  for (const c of cases.filter((c) => !c.differs?.web)) {
+    const kind = classifyLink(c.input, BASE).kind;
+    assert.equal(kind === 'never' ? 'refuse' : kind, c.expect, c.name);
+  }
+});
+
+// Daybreak 167 (22 Nov 2026) and its reviews: what could hide part of an
+// address in its question is never a link, half a surrogate pair included.
+test('characters that hide part of an address are never a link', () => {
+  for (const href of ['x-app://do?to=me\u202e&to=you', 'x-app://do?\ud800', 'x-app://do?\udc00x', 'x-app://a\u3000b', 'x-app://a\u200bb']) {
+    assert.deepEqual(classifyLink(href, BASE), { kind: 'never' }, JSON.stringify(href));
+  }
+  assert.equal(classifyLink('x-app://do?\ud83d\ude00', BASE).kind, 'ask', 'a whole pair is fine');
+  assert.equal(classifyLink('x-app://do?' + 'a'.repeat(1013), BASE).kind, 'ask');
+  assert.equal(classifyLink('x-app://do?' + 'a'.repeat(1014), BASE).kind, 'never', 'too long to show whole in the apps');
 });

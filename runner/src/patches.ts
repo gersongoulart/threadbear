@@ -495,7 +495,7 @@ async function loadPatchFile(file: string, source: 'home' | 'project', cache: Pa
     // One trust can't check is an error, not a question: there's no
     // version of it to say yes to (patch-trust.ts).
     if (!verdict.trusted && verdict.reason === 'unchecked') return { info: { id, source, file, error: `Not run: ${verdict.problem}` }, panels: [], actions: [], hooks: [] };
-    if (!verdict.trusted) return { info: { id, source, file, untrusted: verdict.reason, hash: verdict.hash, ...(verdict.helpers ? { helpers: verdict.helpers } : {}) }, panels: [], actions: [], hooks: [] };
+    if (!verdict.trusted) return { info: { id, source, file, untrusted: verdict.reason, hash: verdict.hash, ...(verdict.helpers ? { helpers: verdict.helpers } : {}), ...(verdict.changes ? { changes: verdict.changes } : {}) }, panels: [], actions: [], hooks: [] };
     files = verdict.files;
     blocked = verdict.blocked;
     if (verdict.hash && verdict.root && verdict.code && verdict.edges) verified = { hash: verdict.hash, root: verdict.root, code: verdict.code, edges: verdict.edges };
@@ -945,7 +945,7 @@ export function convexProjectOf(dir: string, dirs: FolderCache = new FolderCache
 }
 
 // What the Mac app needs to show Convex's embedded dashboard, which takes a
-// deploy key instead of a login (docs/protocol.md, "The Convex panel"). Only
+// deploy key instead of a login (docs/protocol/patches.md, "The Convex panel"). Only
 // a cloud deployment: the embedded dashboard is https, and a local one's
 // http://127.0.0.1 address would be blocked there as mixed content.
 export function convexEmbed(deployment: string | undefined, deploymentUrl: string | undefined): Panel['convex'] {
@@ -1319,9 +1319,6 @@ export async function applyLive(set: PatchSet, ctx: LiveContext): Promise<PatchS
           timer = setTimeout(() => reject(new Error(`took over ${Math.round(timeoutMs / 1000)} seconds`)), timeoutMs);
         }),
       ]);
-    } catch (e) {
-      if (!errors.has(patch)) errors.set(patch, firstLine(e));
-      throw e;
     } finally {
       clearTimeout(timer);
       shIn.close();
@@ -1330,12 +1327,36 @@ export async function applyLive(set: PatchSet, ctx: LiveContext): Promise<PatchS
   const settle = async <T extends { id: string; patch: string; title: string; badge?: number; summary?: string }>(item: T): Promise<T | undefined> => {
     const fns = liveFor(set, item);
     if (!fns) return item;
+    // A badge, label or summary is worked out beside the `when`, not after
+    // it, so one failing on a Mac where the `when` hides the item isn't a
+    // problem: the app-store patch's badge, asking Apple through a script
+    // only Mike has, showed as "won't load" in every fork's check-up
+    // (discussions/85, 21 Nov). A failing `when` always is.
+    let whenFailed: string | undefined;
+    const otherFailed: string[] = [];
+    const other = <T>(fn: LiveFunction | undefined, read: (v: unknown) => T | undefined): Promise<T | undefined> | undefined =>
+      fn
+        ? call(item.patch, fn).then(read, (e: unknown) => {
+            otherFailed.push(firstLine(e));
+            return undefined;
+          })
+        : undefined;
     const [shown, badge, label, summary] = await Promise.all([
-      fns.when ? call(item.patch, fns.when).then((v) => Boolean(v), () => false) : true,
-      fns.badge ? call(item.patch, fns.badge).then(badgeCount, () => undefined) : undefined,
-      fns.label ? call(item.patch, fns.label).then(labelText, () => undefined) : undefined,
-      fns.summary ? call(item.patch, fns.summary).then(summaryText, () => undefined) : undefined,
+      fns.when
+        ? call(item.patch, fns.when).then(
+            (v) => Boolean(v),
+            (e: unknown) => {
+              whenFailed = firstLine(e);
+              return false;
+            },
+          )
+        : true,
+      other(fns.badge, badgeCount),
+      other(fns.label, labelText),
+      other(fns.summary, summaryText),
     ]);
+    const problem = whenFailed ?? (shown ? otherFailed[0] : undefined);
+    if (problem && !errors.has(item.patch)) errors.set(item.patch, problem);
     if (!shown) return undefined;
     const out = { ...item };
     if (label !== undefined) out.title = label;

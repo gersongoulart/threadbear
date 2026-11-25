@@ -1,7 +1,12 @@
 # Agent Archive through Threadbear
 
 Plan written 20 Nov 2026 (thread b2612e00, asked for by the weekly Convex
-usage check, ff30633e). Nothing here is built yet: build when Mike says.
+usage check, ff30633e). Mike said build it the same day; stages 1 and 2 are
+built behind the `archive` experiment (runner/src/experiments/archive.md),
+the rest waits. Five changes he agreed before the build are folded in below:
+the sync stays a background service of its own, Tinker Desk is out (it has
+no runner), the experiment's check-in asks about the next stage, the two
+repos stay apart until stage 4, and stage 2 comes straight after stage 1.
 
 Mike wants Agent Archive (`~/dev/me/agent-archive`, private) done through
 Threadbear, so there's one daemon, one search and one place agents ask,
@@ -30,11 +35,11 @@ it's why full sync (30 days of scrubbed tool output in the mirror) is
 nothing to do with this.
 
 ```text
-  M5 runner      Tinker Desk runner      cloud runner      Bruce runner
-     |                  |                     |                 |
-     | sync worker: CLI folders (Claude, Codex, Grok, Muse),    |
+  M5 runner              cloud runner              Bruce runner
+     |                        |                         |
+     | each machine's sync: CLI folders (Claude, Codex, Grok, Muse),    |
      | RememBear summaries, plus which Threadbear thread is which
-     v                  v                     v                 v
+     v                        v                         v
   +---------------------------------------------------------------+
   |  archive host (Bruce): SQLite + FTS5, LanceDB, files; 27 GB   |
   |  daemon RPC   search   reader   Quick Ask                     |
@@ -52,10 +57,10 @@ nothing to do with this.
   secrets, and uploads through one RPC route, `POST /api/daemon/rpc`, with
   a device token kept in Keychain. Per-file checkpoints in
   `sync-state.json` mean a file is only re-sent when it changed.
-  Tinker Desk and the cloud runner have no daemon, so their threads aren't
-  archived.
+  The cloud runner has no daemon, so its threads aren't archived. (Tinker
+  Desk runs no Threadbear and isn't part of this.)
 - **The host** (`server/`, 26k lines): one Node process on Bruce since
-  24 Oct, at `https://bruce.tail9ef766.ts.net:9443` (tailnet only). 27 GB
+  24 Oct, at `https://bruce.<tailnet>.ts.net:9443` (tailnet only). 27 GB
   on 20 Nov: `archive.db` 6 GB, files 12 GB, vectors 8.6 GB (LanceDB and
   `vectors.db`). Hybrid search, the indexer (embeddings through Mike's
   OpenRouter key), the reader, Quick Ask. Its own LaunchAgent and deployer.
@@ -79,10 +84,10 @@ nothing to do with this.
 
 | | Today | With this plan |
 |---|---|---|
-| Sync | a daemon LaunchAgent on the M5 and Bruce | a worker each runner starts and watches, on every runner (Tinker Desk and cloud too) |
+| Sync | a daemon LaunchAgent on the M5 and Bruce, updated by hand on the M5 | the same service on every runner's machine (cloud too), kept on main and watched by Threadbear |
 | Host | Bruce, its own LaunchAgent and deployer | Bruce, started by Bruce's runner, updated with Threadbear's releases |
 | Agents' tools | the agent-archive MCP server, global config | the same seven tools, same names, from the runner's release |
-| Reader | `bruce.tail9ef766.ts.net:9443` | the same, plus an Archive panel in Threadbear and links both ways |
+| Reader | `bruce.<tailnet>.ts.net:9443` | the same, plus an Archive panel in Threadbear and links both ways |
 | Quick Ask | the host's `/api/quick/ask` | unchanged |
 | The 27 GB | on Bruce | stays on Bruce. Nothing is copied |
 | Code | the agent-archive repo | Threadbear's repo, once Mike makes it public (stage 4) |
@@ -98,12 +103,19 @@ What the runner adds is what only it knows (stage 2): which session
 belongs to which Threadbear thread, its title, project, runner and
 account.
 
-**The worker is a child process, not the runner.** The importer parses
-rollouts up to 1 GB (a 418 MB one is in the archive) and the runner's own
-loop has to stay quick. The runner starts the sync worker, restarts it if
-it dies, stops it for a restart, and shows its state; the worker keeps the
-daemon's lock, checkpoints and backoff as they are. Same for the host on
-Bruce. One thing to install and update, two processes as now.
+**The sync stays a background service of its own.** The first draft had the
+runner start the sync as a child process. But the runner moves to a new
+release several times an hour (three in the hour before the build), and
+each move would stop the sync mid-upload, so a big transcript (one is
+418 MB) could keep starting over. So the sync stays a LaunchAgent (systemd
+on Linux), and Threadbear updates and watches it instead: runner restarts
+never touch it. Its lock, checkpoints and backoff stay the archive's own.
+The same goes for the server on Bruce in stage 3.
+
+**The runner never holds an archive credential.** It writes what only it
+knows to a file in its data folder, and the archive's sync, which has the
+device token already, reads the file and sends it up. So nothing in
+Threadbear can upload to or read from the archive by itself.
 
 **The archive's tools stay a server of their own.** Adding seven tools to
 the `threadbear` MCP would put them in every stranger's thread, on the
@@ -121,68 +133,112 @@ unless Mike wants it kept.
 
 **An experiment first.** It changes what runs on the machine and what's
 sent where, so it lands as an experiment, `archive`, off by default and on
-for Mike (AGENTS.md, "Experiments").
+for Mike (AGENTS.md, "Experiments"). It can't go on for everyone until the
+code is public (stage 4), so its check-in (schedule 1a56bc60, 24 Nov) asks
+whether to go on to the next stage, not whether to make it standard. For
+anyone else it only keeps the sessions list, and its description says it's
+for people running Agent Archive.
 
 ## Stages
 
-### 1. The runner runs the sync
+### 1. Threadbear keeps the sync up to date and watches it (built 20 Nov)
 
-The runner starts the archive's sync worker and keeps it running, in place
-of the daemon's LaunchAgent.
+`runner/src/agent-archive.ts`, every ten minutes with the experiment on:
 
-- Until stage 4 the worker is the installed Agent Archive runtime
-  (`~/Library/Application Support/Agent Archive/runtime/current`,
-  `run-service`), so no archive code enters this repo yet. Its config,
-  device token and `sync-state.json` stay where they are, so on the M5 and
-  Bruce it picks up from the daemon's checkpoints and nothing is sent
-  again. Then the daemon's LaunchAgent is removed (`agent-archive
-  uninstall`, which keeps config and state).
-- The handover: stop the LaunchAgent, wait for `daemon.lock` to clear,
-  start the worker. The lock already refuses two at once, so a mistake
-  waits rather than doubling up.
-- Tinker Desk and the cloud runner are enrolled as new devices. Each needs
-  the enrollment secret once; it goes over ssh from the M5 for that one
-  command and isn't kept there. Their threads start reaching the archive.
-- `tb status` shows the worker: last sync, files waiting, failing files,
-  and the host it sends to. Settings > General lists the host.
-- Sandboxes and disposable runners never run it.
-- docs: `on-your-mac.md` (the worker, what it reads, where it sends),
-  the experiment's file, `guide.md` under its experiment.
+- **Watching.** It runs the sync's `status --json` and puts one line in
+  `tb status`: where it syncs to, when it last finished, failing files, and
+  "nothing synced for ..." past three hours. An older sync without
+  `--json` is said to be too old, and the next update fixes that.
+- **Updating.** With `archive.repo` in runner.json, it checks the repo's
+  main with `git ls-remote`. When main moves it builds the sync in
+  `~/Library/Caches/Threadbear/agent-archive` (clone, `npm ci`,
+  `build:daemon`, all at the runner's job priority) and runs the
+  archive's own `install-runtime` with the runtime's own Node, which swaps
+  the release in and restarts the service. A commit that fails isn't tried
+  again; the next one is. The last build is kept in
+  `agent-archive-update.json`.
+- **Other machines.** The cloud box can't reach the private repo and has no
+  Node on its ssh PATH, so after the M5's install the build is copied to
+  each `archive.pushTo` machine (`{ host, node }`) over ssh and installed
+  there with that machine's node.
+- **Bruce.** Its archive server's deployer already builds main and runs
+  `install-runtime` for Bruce's sync, so a machine with the server's
+  folder leaves updates to it and only watches.
+- **Enrolling the cloud box.** Done once by hand: Bruce's server opens a
+  short enrollment window (`agent-archive-server admin enrollment open`),
+  the cloud box enrolls and installs, and the window is closed.
+- The services already installed on the M5 and Bruce are kept as they are,
+  with their tokens and checkpoints: nothing is re-sent and nothing moves.
+- Mike's runner.json on the M5: `"archive": { "repo":
+  "https://github.com/mikecann/agent-archive.git", "pushTo": [{ "host":
+  "cloud", "node": "<its node>" }] }`, and the experiment on there, on
+  Bruce and on cloud. The repo is the https address, not ssh: the runner's
+  LaunchAgent has no ssh agent, so `git@github.com:` is refused there,
+  while https goes through git's own credential helper (`gh`).
 
 ### 2. The archive knows Threadbear's threads
 
-The runner tells the host which sessions are which threads, and both sides
-link to each other.
+The runner says which sessions are which threads, and both sides link to
+each other.
 
-- A new RPC operation, `annotateSessions`: for each CLI session id a
-  thread has used, its Threadbear thread id, title, project, runner and
-  account, sent when a thread starts a session or is renamed or moved. The
+- The runner writes `archive-sessions.json` in its data folder (built
+  20 Nov): for each Claude or Codex session a thread has used, its thread
+  id, title, project and folder, and the runner's name. A thread only
+  remembers its current session, so the file keeps every one it has seen;
+  a rename or a project change updates all of a thread's entries.
+- The archive's sync reads that file each poll and sends what changed
+  through a new RPC operation, `annotateSessions`, with its own token. The
   host keeps them in a table of their own beside the imported threads (an
-  annotation never edits the faithful record).
+  annotation never edits the faithful record). Merged in agent-archive
+  #93 on 20 Nov, with `status --json` and the sync reading every login's
+  folders from the file (`claudeRoots`, `codexRoots`).
 - The archive's tools and reader say "Threadbear thread: <title>" with a
   `threadbear://thread/<id>` link, and search can filter by project.
+- The app's thread search searches the archive too (built 23 Nov). Mike
+  was shown three ways to bring the archive into the app (review
+  4ead0306): earlier work in a panel beside each thread, the search box
+  searching the archive, and an Ask panel. He picked the search box: "I
+  don't think it makes sense to have a separate panel", and asking is a
+  thread's job, as "the agent should always have access to it". Hits
+  come after the app's own threads; one opens its Threadbear thread, or
+  else read-only in the thread's place, with New thread from this. The
+  runner runs the archive's own `search --json` and `read --json`
+  (agent-archive #96) with its read-only key, so it still holds no
+  credential (docs/protocol/threads.md, "Searching Agent Archive").
+- Every thread gets the archive's MCP server while the experiment's on
+  (built 23 Nov): the cloud box's Threadbear login had no `agent-archive`
+  in its config, so threads there couldn't search it.
 - Threadbear can then use the archive: "Threads already on it" (the
   `sameWork` experiment) could look past open threads, and the thread
   digests idea (6eecd8a8) that concluded "ask Bruce" has somewhere to ask.
 - `archivedMediaDays` can wait for the host to have a thread before
   clearing its pictures, instead of trusting that it does.
 
-### 3. Bruce's runner runs the host
+### 3. Threadbear looks after the host (built 24 Nov)
 
-Bruce's runner starts the archive server and keeps it running, in place of
-its own LaunchAgent, and it updates with Threadbear's releases instead of
-its own deployer.
+The archive server on Bruce stays a LaunchAgent of its own, for the same
+reason as the sync (runner restarts must never stop it), and its own
+deployer keeps doing the builds until stage 4. Threadbear watches it and
+starts it again when it has stopped. Mike chose this step on 24 Nov
+(thread 1ac3962f), without the Archive panel he'd passed over.
 
-- A runner setting, `archive.host`: the URL it sends to, or `"here"` to
-  run the host on this runner (Bruce's). The worker takes its URL from it.
-- The server keeps its data folder (`~/Library/Application Support/Agent
-  Archive Server/data`), its `server.json`, its backups and its Tailscale
-  address. Bruce has 8 GB and already swaps, so this adds no process: the
-  same server, started by something else.
-- Until stage 4 the runner starts the server's installed release, as in
-  stage 1.
-- A Threadbear panel, Archive, opens the host's reader for this thread's
-  project. It's a URL panel, so no reader is rebuilt.
+- **Watching, on every runner.** Each tick, after the sync's status, the
+  runner asks `/api/health` at the sync's own `archiveUrl` (so no new
+  setting: the sync already knows its host). `tb status` adds a sentence:
+  healthy on its release, or what's wrong (a failed deploy, a deployer that
+  can't reach the repo, a failed backup or one over two days old, a failed
+  restore test, under 10 GB of disk), or "isn't answering, for ..." with
+  the error. Going down and coming back are logged once each.
+- **Starting it again, on Bruce.** On the machine with the server's folder,
+  a server that hasn't answered two checks running (one could be a deploy
+  swapping releases) and that `launchctl print` shows without a pid is
+  started with `launchctl kickstart`, never `-k`, so a running server is
+  never stopped; at most once an hour. A running server that doesn't
+  answer, or a service that isn't loaded (taken out on purpose), is only
+  reported. Its LaunchAgent has `KeepAlive`, so this is for when launchd
+  has given up on it.
+- The server keeps its data folder, `server.json`, backups and Tailscale
+  address. Bruce has 8 GB and already swaps, so this adds no process.
 
 ### 4. The code moves into Threadbear
 
@@ -197,8 +253,9 @@ and the agent-archive repo is retired.
   the rest are only installed on a runner with the archive on, never for
   everyone.
 - `runner/src/redaction.ts` and the archive's redaction become one.
-- The worker and the host are built from the runner's release instead of
-  the separate runtime, and the Agent Archive runtime folder goes.
+- The sync and the host are built from the runner's release instead of
+  agent-archive's main, so `archive.repo`, `archive.pushTo` and the
+  server's deployer go: every runner already follows Threadbear's main.
 - The Convex host (`convex/`) is dropped, as bruce-migration's stage 15
   already plans.
 - `docs/forking.md` gets the archive: where it lives, how to take it out,
@@ -209,7 +266,7 @@ and the agent-archive repo is retired.
 Once the code is public, a stranger's runner can run the archive too.
 
 - Turning it on in Settings starts the host on that Mac, on loopback, and
-  the worker sending to it. Nothing leaves the Mac. Their other Macs can
+  the sync sending to it. Nothing leaves the Mac. Their other Macs can
   send to it over their tailnet, or to a host at an address of their own.
 - Keyword search works with nothing else. Embeddings need a key (OpenRouter
   or OpenAI), asked for in Settings, and say what they'll cost before the
@@ -227,17 +284,21 @@ Once the code is public, a stranger's runner can run the archive too.
 Nothing is copied. The 27 GB stays on Bruce, the M5's and Bruce's device
 tokens stay what they are, and their checkpoints carry on. In order:
 
-1. Stage 1 on the M5: worker started by the runner, daemon removed, a sync
-   checked (`agent-archive status` shows the same checkpoints moving).
-2. The same on Bruce.
-3. Tinker Desk and cloud enrolled; their first runs backfill whatever their
-   CLI folders still hold (older history on them is gone where the CLIs
+1. Stage 1 on the M5: the experiment on and `archive.repo` set, the next
+   build of main installed over the existing service by its own installer,
+   a sync checked (`agent-archive status` shows the same checkpoints
+   moving).
+2. Bruce: the experiment on, so the runner watches; its deployer carries
+   on updating.
+3. The cloud box enrolled; its first runs backfill whatever its CLI
+   folders still hold (older history on them is gone where the CLIs
    cleaned it up).
-4. Stage 3 on Bruce: the server's LaunchAgent removed once the runner has
-   it running, Quick Ask and the reader checked from the phone and the M5.
+4. Stage 3 on Bruce: the runner watches the server and starts it again when
+   it stops (its deployer keeps the updates until stage 4), Quick Ask and the reader checked from the phone and the M5.
 
-Each step goes back by reinstalling the LaunchAgent it replaced, with the
-same config and state.
+Each step goes back by turning the experiment off (the services carry on
+as they are), or for a bad build, the archive's own rollback to its
+previous runtime release.
 
 ## Still to decide
 

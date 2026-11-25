@@ -1,6 +1,6 @@
 // The short list of shell a command that runs by itself may use: a live
 // function's `sh(...)` (badges, `when`, summaries, list panels) and a
-// folder's Claude Code hooks and settings commands (docs/protocol.md,
+// folder's Claude Code hooks and settings commands (docs/protocol/trust.md,
 // "Commands that run by themselves", "Trusting a folder's Claude Code
 // hooks").
 //
@@ -1167,7 +1167,7 @@ class Allow {
     if (name === 'find') return this.find(args, ctx, line);
     if (name === 'awk' || name === 'gawk' || name === 'nawk' || name === 'mawk') return this.awk(args, ctx, line);
     if (HOOK_PROGRAMS.has(name)) return this.hookProgram(name, args, ctx, line);
-    this.refuse(ctx, line, `runs ${name}, which isn't on the short list of programs a Claude Code hook may run: ones that load no code from the folder, run nothing they're handed and write no file (docs/protocol.md, "The short list of shell").`);
+    this.refuse(ctx, line, `runs ${name}, which isn't on the short list of programs a Claude Code hook may run: ones that load no code from the folder, run nothing they're handed and write no file (docs/protocol/trust.md, "The short list of shell").`);
   }
 
   // A live command: only the programs on the live list, in their forms.
@@ -1192,7 +1192,7 @@ class Allow {
       return;
     }
     if (!Object.hasOwn(LIVE, name)) {
-      this.refuse(ctx, line, `runs ${name}, which isn't on the short list of programs a live command may run (docs/protocol.md, "The short list of shell").`);
+      this.refuse(ctx, line, `runs ${name}, which isn't on the short list of programs a live command may run (docs/protocol/trust.md, "The short list of shell").`);
     }
     const operands = this.spec(name, args, ctx, line, LIVE[name]!);
     if (name === 'ssh') this.remoteCommand(operands.slice(1).join(' '), ctx, line);
@@ -1945,7 +1945,7 @@ export function ownedPathProblem(p: string): string | undefined {
 function aclProblem(paths: string[]): string | undefined {
   let out: string;
   try {
-    out = execFileSync('/bin/ls', ['-led', '--', ...paths], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 5000, maxBuffer: 1024 * 1024 }).toString();
+    out = execFileSync('/bin/ls', ['-led', '--', ...paths], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 20_000, maxBuffer: 1024 * 1024 }).toString();
   } catch {
     return "its folders' access lists can't be read";
   }
@@ -1993,18 +1993,22 @@ function gitNewEnough(): boolean {
   if (gitVersion && Date.now() - gitVersion.at < 10 * 60_000) return gitVersion.ok;
   let ok = false;
   try {
-    const m = /git version (\d+)\.(\d+)/.exec(execFileSync('git', ['--version'], { stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).toString());
+    const m = /git version (\d+)\.(\d+)/.exec(execFileSync('git', ['--version'], { stdio: ['ignore', 'pipe', 'ignore'], timeout: 20_000 }).toString());
     ok = !!m && (Number(m[1]) > 2 || (Number(m[1]) === 2 && Number(m[2]) >= 31));
   } catch {
-    ok = false;
+    // Not kept: a git that was only slow (a busy Mac) is asked again next
+    // time, rather than read as too old for ten minutes.
+    return false;
   }
   gitVersion = { at: Date.now(), ok };
   return ok;
 }
 
 // git config --list --show-scope -z: scope, then key and value.
+// 20 s, not 5: on a busy Mac (load 25) git took longer, and a timeout
+// refuses the command. Refusing is safe, so waiting only costs time.
 function gitConfig(cwd: string, env: Record<string, string | undefined> = process.env): { scope: string; key: string; value?: string }[] {
-  const out = execFileSync('git', ['config', '--list', '--show-scope', '--includes', '-z'], { cwd, env: env as NodeJS.ProcessEnv, stdio: ['ignore', 'pipe', 'pipe'], timeout: 5000, maxBuffer: 4 * 1024 * 1024 }).toString();
+  const out = execFileSync('git', ['config', '--list', '--show-scope', '--includes', '-z'], { cwd, env: env as NodeJS.ProcessEnv, stdio: ['ignore', 'pipe', 'pipe'], timeout: 20_000, maxBuffer: 4 * 1024 * 1024 }).toString();
   const items = out.split('\0');
   const list: { scope: string; key: string; value?: string }[] = [];
   for (let i = 0; i + 1 < items.length; i += 2) {

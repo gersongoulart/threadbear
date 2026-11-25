@@ -15,6 +15,7 @@ import { toPhoneAsk } from '../../src/sync.ts';
 import { CodexTools, type ToolDefinition } from '../../src/adapters/codex/tools.ts';
 import { toolTitle } from '../../src/tools.ts';
 import { ThreadRouter } from '../../src/handover.ts';
+import { startedHeader } from '../../src/cross-runner.ts';
 
 function start(h: ReturnType<typeof makeHarness>, text = 'Fix the tests', extra: Record<string, unknown> = {}) {
   const { thread } = h.runner.create({ text, accountId: 'claude-3', ...extra });
@@ -386,6 +387,12 @@ test('parseWhen and tool titles', () => {
   assert.equal(parseWhen('30m', now), '2026-10-26T12:30:00.000Z');
   assert.equal(parseWhen('1d', now), '2026-10-27T12:00:00.000Z');
   assert.throws(() => parseWhen('soonish', now));
+  // Words with a number in are words, not a time: V8's Date.parse reads
+  // "MACG-3843" as the year 3843 and "after PR 123" as the year 123 (a
+  // thread showed snoozed until 3843-01-01, 20 Nov).
+  for (const words of ['MACG-3843', 'after PR 123', '3843', 'Nov 21']) assert.throws(() => parseWhen(words, now), words);
+  assert.equal(parseWhen('2026-10-27T09:00:00+08:00', now), '2026-10-27T01:00:00.000Z');
+  assert.equal(parseWhen('2026-10-28', now), '2026-10-28T00:00:00.000Z');
   assert.equal(toolTitle('mcp__threadbear__move_thread', { folder: '~/dev/x' }, '/'), 'Move this thread to ~/dev/x');
   assert.equal(toolTitle('mcp__threadbear__delete_thread', { threadId: 'abcdef123456' }, '/'), 'Delete thread abcdef12');
 });
@@ -523,7 +530,7 @@ test('end_turn is refused until the turn has replied to Alex in text', async () 
   assert.deepEqual(slept, []);
 });
 
-// The summary is the turn's reply (docs/protocol.md, "The summary"): in 36
+// The summary is the turn's reply (docs/protocol/needs-you.md, "The summary"): in 36
 // test sessions Opus left its final message as prose, and put bullets in
 // end_turn every time (29 Oct 2026).
 test('end_turn with a summary needs no message first, and the runner writes it as the reply', async () => {
@@ -1245,6 +1252,108 @@ test('a reply that came only as a summary: end_turn asks for it again, and the r
   assert.doesNotMatch(read.text, /resent the full/);
 });
 
+test('end_turn asks once whether asks wait for a shell job still running, and the thread stays under Running when they do', async () => {
+  // 24 Nov 2026: "it's landing now, I'll confirm here once it's on main",
+  // with an ask about a PR, sat in Mike's Inbox while the landing ran.
+  const ask = { asks: [{ question: 'Pass on the Terminal tabs PR?', options: [{ label: 'Pass' }, { label: 'Take it' }] }] };
+  const h = makeHarness();
+  const { thread, s } = start(h);
+  s.text('m1', 'Landing now.');
+  s.out({ kind: 'tasks', tasks: [{ id: 'b1', type: 'local_bash', kind: 'shell', description: 'Land the picker fix' }] });
+  const { call } = tools(h, thread.id, undefined, () => true);
+  toolCall(s, 'e1', END_TURN, ask);
+  const refused = await call('end_turn', ask);
+  assert.equal(refused.error, true);
+  assert.match(refused.text, /^Not ended: you are asking the user something while a background job of yours is still running \("Land the picker fix"\)/);
+  assert.match(refused.text, /askWhen: "jobsEnd"/);
+  assert.match(refused.text, /askWhen: "now"/);
+  s.out({ kind: 'event', event: { type: 'tool.result', itemId: 'e1', ok: false, text: refused.text, truncated: false, images: [] } });
+  // Said: taken, and the thread isn't waiting on Mike while the job runs.
+  const held = { ...ask, askWhen: 'jobsEnd' };
+  toolCall(s, 'e2', END_TURN, held);
+  assert.equal((await call('end_turn', held)).error, false);
+  s.out({ kind: 'event', event: { type: 'tool.result', itemId: 'e2', ok: true, text: 'Noted: this thread needs the user.', truncated: false, images: [] } });
+  s.result('completed');
+  let sum = h.runner.get(thread.id);
+  assert.equal(sum.needs, 'you');
+  assert.equal(sum.asksAfterJobs, true);
+  assert.equal(sum.needsYou, false);
+  assert.equal(sum.waitState, 'job');
+  // The job ends and no turn comes to read it: the asks are Mike's.
+  s.out({ kind: 'tasks', tasks: [] });
+  h.clock.advance(60_000);
+  sum = h.runner.get(thread.id);
+  assert.equal(sum.waitState, 'needsYou');
+});
+
+test('held asks: the next turn is asked once before ending with nothing, and a job started later holds nothing', async () => {
+  // Codex and Gemini's review, 24 Nov: the turn the landing's end opens
+  // said "Landed", needs nothing, and the held card was gone unseen.
+  const ask = { asks: [{ question: 'Pass on the Terminal tabs PR?', options: [{ label: 'Pass' }, { label: 'Take it' }] }], askWhen: 'jobsEnd' };
+  const h = makeHarness();
+  const { thread, s } = start(h);
+  s.text('m1', 'Landing now.');
+  s.out({ kind: 'tasks', tasks: [{ id: 'b1', type: 'local_bash', kind: 'shell', description: 'Land the picker fix' }] });
+  const { call } = tools(h, thread.id, undefined, () => true);
+  toolCall(s, 'e1', END_TURN, ask);
+  assert.equal((await call('end_turn', ask)).error, false);
+  s.out({ kind: 'event', event: { type: 'tool.result', itemId: 'e1', ok: true, text: 'Noted: this thread needs the user.', truncated: false, images: [] } });
+  s.result('completed');
+  assert.equal(h.runner.get(thread.id).waitState, 'job');
+  // The landing goes and a dev server is left: it isn't what the asks wait for.
+  s.out({ kind: 'tasks', tasks: [{ id: 'b2', type: 'local_bash', kind: 'shell', description: 'Dev server' }] });
+  assert.equal(h.runner.get(thread.id).waitState, 'job', 'held through the wake grace');
+  h.clock.advance(60_000);
+  assert.equal(h.runner.get(thread.id).asksAfterJobs, undefined);
+  assert.equal(h.runner.get(thread.id).waitState, 'needsYou');
+  // A turn that ends with no end_turn at all leaves the held card standing.
+  h.runner.send(thread.id, 'next');
+  await tick();
+  const s2 = h.adapter.last;
+  s2.text('m2', 'Landed.');
+  s2.result('completed');
+  const sum = h.runner.get(thread.id);
+  assert.equal(sum.needs, 'you');
+  assert.equal(sum.asks?.[0].action, 'Pass on the Terminal tabs PR?');
+  // And one can't end with nothing without hearing about them, once.
+  h.runner.send(thread.id, 'and now?');
+  await tick();
+  const s3 = h.adapter.last;
+  s3.text('m3', 'All landed.');
+  const done = { needs: 'nothing' };
+  toolCall(s3, 'e2', END_TURN, done);
+  const refused = await call('end_turn', done);
+  assert.equal(refused.error, true);
+  assert.match(refused.text, /^Not ended: last turn you held asks back until your job ended, and the user has not seen them \("Pass on the Terminal tabs PR\?"\)/);
+  s3.out({ kind: 'event', event: { type: 'tool.result', itemId: 'e2', ok: false, text: refused.text, truncated: false, images: [] } });
+  toolCall(s3, 'e3', END_TURN, done);
+  assert.equal((await call('end_turn', done)).error, false);
+});
+
+test('end_turn with asks and a shell job running: "now" is taken at once and goes to the Inbox, and with no job nothing is asked', async () => {
+  const ask = { asks: [{ question: 'Does the preview look right?', options: [{ label: 'Yes' }, { label: 'No' }] }] };
+  const h = makeHarness();
+  const { thread, s } = start(h);
+  s.text('m1', 'The preview is up.');
+  s.out({ kind: 'tasks', tasks: [{ id: 'b1', type: 'local_bash', kind: 'shell', description: 'Dev server' }] });
+  const { call } = tools(h, thread.id, undefined, () => true);
+  const now = { ...ask, askWhen: 'now' };
+  toolCall(s, 'e1', END_TURN, now);
+  assert.equal((await call('end_turn', now)).error, false);
+  s.out({ kind: 'event', event: { type: 'tool.result', itemId: 'e1', ok: true, text: 'Noted: this thread needs the user.', truncated: false, images: [] } });
+  s.result('completed');
+  const sum = h.runner.get(thread.id);
+  assert.equal(sum.asksAfterJobs, undefined);
+  assert.equal(sum.waitState, 'needsYou');
+
+  const other = makeHarness();
+  const o = start(other);
+  o.s.text('m1', 'Done.');
+  const plain = tools(other, o.thread.id, undefined, () => true);
+  toolCall(o.s, 'e1', END_TURN, ask);
+  assert.equal((await plain.call('end_turn', ask)).error, false);
+});
+
 test('end_turn asks once about an ask pointing at another thread with no link, and takes a thread: link', async () => {
   // 17 Nov 2026: "Pick a direction ... in its own thread", no answers, no
   // link, and on the phone no way to that thread.
@@ -1294,6 +1403,14 @@ test('end_turn asks once about an ask pointing at another thread with no link, a
   assert.equal(fine.error, false, fine.text);
   // And it reaches the phone (toPhoneAsk keeps it).
   assert.deepEqual(toPhoneAsk({ action: 'x', links: [{ title: 'Open its thread', url: `thread:${app.id}` }, { title: 'File', url: '/tmp/a.png' }] }).links, [{ title: 'Open its thread', url: `thread:${app.id}` }]);
+});
+
+test("an ask's review link reaches the phone, which opens it in its Reviews sheet", () => {
+  // 21 Nov 2026: a pick between three mocks reached the phone as a bare
+  // question, its "Open the three mocks" link dropped on the way.
+  const review = 'review:0a7d18e2-5c14-45d3-ae06-5e1e13aa47d5';
+  assert.deepEqual(toPhoneAsk({ action: 'Which way?', links: [{ title: 'Open the three mocks', url: review }] }).links, [{ title: 'Open the three mocks', url: review }]);
+  assert.equal(toPhoneAsk({ action: 'x', links: [{ title: 'Bad', url: 'review:../../etc' }] }).links, undefined);
 });
 
 test('end_turn asks once for a try at a step a card hands over, in both forms', async () => {
@@ -1711,7 +1828,7 @@ test("end_turn lists only today's form, whichever forms it takes", async () => {
   const h = makeHarness();
   const { thread } = start(h);
   const one = await mcpClient(h, thread.id, true).endTurnShown();
-  assert.deepEqual(Object.keys(one.inputSchema.properties).sort(), ['archive', 'asks', 'byline', 'findings', 'headline', 'needs', 'next', 'snooze', 'waitFor']);
+  assert.deepEqual(Object.keys(one.inputSchema.properties).sort(), ['archive', 'askWhen', 'asks', 'byline', 'findings', 'headline', 'needs', 'next', 'snooze', 'waitFor']);
   assert.ok(!one.inputSchema.required?.length, 'every field is optional');
   const ask = (one.inputSchema.properties.asks as { items: { required: string[]; properties: Record<string, { description?: string; items?: { type?: string } }> } }).items;
   assert.deepEqual(ask.required, ['question']);
@@ -1830,7 +1947,7 @@ test('the patches line sends button and panel asks to a patch file, by the proto
   const { patchesLine } = await import('../../src/threadbear-mcp.ts');
   const line = patchesLine('/Users/someone/threadbear/docs/guide.md', () => true);
   assert.match(line, /\.threadbear\/patches\/<name>\.ts/);
-  assert.ok(line.includes(path.join('/Users/someone/threadbear', 'docs', 'protocol.md')), line);
+  assert.ok(line.includes(path.join('/Users/someone/threadbear', 'docs', 'protocol', 'patches.md')), line);
   assert.match(line, /Edit or Write/);
   assert.match(line, /not a pin/);
   assert.equal(patchesLine('/nowhere/docs/guide.md', () => false), '');
@@ -1954,7 +2071,7 @@ test('one reply: after hidden text, end_turn asks for the answer and evidence, i
   assert.match(r.text, /If the user needs a draft or descriptions of choices/, 'what the asks are about always goes in the reply');
 });
 
-// One reply (docs/protocol.md, "One reply"; 1 Nov 2026): end_turn carries
+// One reply (docs/protocol/needs-you.md, "One reply"; 1 Nov 2026): end_turn carries
 // the card and a headline, and the message after it is the reply.
 test('one reply: end_turn takes the card, never asks for a message first, and says the reply comes next', async () => {
   const h = makeHarness();
@@ -2016,6 +2133,29 @@ test("one reply: a reply that ends in a What I need from you section gives the c
   s.result('completed');
   await tick();
   assert.equal(h.runner.get(thread.id).needs, 'you');
+});
+
+// Thread 649fc651 (21 Nov 2026): Mike asked "Anything you need from me
+// here?", the agent called end_turn first and then answered "Nothing needed
+// from you. ..." with two paragraphs. The line took the whole reply off as a
+// closing section, the event was written with no text, and the Stop hook
+// didn't ask for a reply, as the agent had written one.
+test('one reply: a reply that opens "Nothing needed from you" reaches the thread whole', async () => {
+  const h = makeHarness();
+  const { thread, s } = start(h);
+  const { call } = tools(h, thread.id, undefined, () => true);
+  const input = { needs: 'nothing', headline: 'Nothing needed; waiting on the re-test' };
+  toolCall(s, 'e1', END_TURN, input);
+  const r = await call('end_turn', input);
+  s.out({ kind: 'event', event: { type: 'tool.result', itemId: 'e1', ok: true, text: r.text, truncated: false, images: [] } });
+  const words = 'Nothing needed from you. The sprinklers are on Auto, and the next run is Monday at 6:00.\n\nThe only thing outstanding is the re-test. This thread is asleep until then.';
+  s.text('m1', words);
+  const reply = h.events(thread.id).find((e) => e.type === 'assistant.text' && e.itemId === 'm1');
+  assert.ok(reply?.type === 'assistant.text' && reply.final);
+  assert.equal(reply.text, words);
+  s.result('completed');
+  await tick();
+  assert.equal(h.runner.get(thread.id).needs, 'nothing');
 });
 
 // ------------------------------------------------------------ other runners' threads
@@ -2439,4 +2579,22 @@ test("a short id here is found when the list of other Macs' threads never comes 
   const r = (await list.find((x) => x.name === 'read_thread')!.handler({ threadId: other.id.slice(0, 8) } as never, {})) as { content: { text: string }[]; isError?: boolean };
   assert.equal(Boolean(r.isError), false, r.content[0].text);
   assert.match(r.content[0].text, /Answerer/);
+});
+
+// A thread the main Mac started on a runner-key runner (the Pixel, 20 Nov)
+// can't reach its starter: send_message to it says the report goes back
+// in its reply (far-reports.ts) rather than "No thread".
+test('send_message to the thread on another Mac that started this one says to put the report in the reply', async () => {
+  const h = makeHarness();
+  const starter = '02888d03-bca0-4aa4-9f9d-ce61750f0dae';
+  const { thread } = start(h, `${startedHeader(starter, 'M5')}Find out why the update failed, and send_message me what you find.`);
+  const { call } = tools(h, thread.id);
+  for (const id of [starter, '02888d03']) {
+    const r = await call('send_message', { threadId: id, text: 'Found it.' });
+    assert.equal(r.error, true);
+    assert.match(r.text, /Not sent: thread 02888d03-bca0-4aa4-9f9d-ce61750f0dae started this one from another Mac.*put your report in your reply/);
+  }
+  // A few characters of it, or any other id it can't find, is still "No thread".
+  assert.match((await call('send_message', { threadId: '0288', text: 'x' })).text, /No thread with id 0288/);
+  assert.match((await call('send_message', { threadId: '0000dead-0000-0000-0000-000000000000', text: 'x' })).text, /No thread with id 0000dead/);
 });

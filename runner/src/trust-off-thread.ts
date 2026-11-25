@@ -17,7 +17,7 @@
 // the urgent one never does, as a pull just before the message may have
 // brought hooks the earlier look missed.
 import { SHARE_ENV, Worker } from 'node:worker_threads';
-import { claudeCommands, type ClaudeCommands } from './claude-trust.ts';
+import { claudeCommandsKinds, type ClaudeCommands } from './claude-trust.ts';
 import { codeOfUnhashedPatch, type UnsureWhy } from './unhashed-scan.ts';
 import { noFifoReads } from './no-fifo-reads.ts';
 import { spawnGateInstalled } from './spawn-gate.ts';
@@ -25,7 +25,7 @@ import { spawnGateInstalled } from './spawn-gate.ts';
 export type TrustRequest = { id: number } & (
   // One look per kind of thread (grants or not), one after the other.
   | { kind: 'claudeCommands'; cwd: string; home: string; grants: boolean[] }
-  | { kind: 'editsAsk'; file: string; from: string; now: number }
+  | { kind: 'editsAsk'; file: string; from: string; now: number; maxAgeMs?: number }
 );
 // `ready`: sent once, when the worker's code has loaded.
 export type TrustReply = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: string } | { ready: true };
@@ -46,8 +46,8 @@ const LOAD_TIMEOUT_MS = 30_000;
 // Its reads still never wait on a FIFO (no-fifo-reads.ts).
 function inline(ask: Ask): unknown {
   return noFifoReads(() => {
-    if (ask.kind === 'claudeCommands') return ask.grants.map((grants) => claudeCommands(ask.cwd, ask.home, { grants }));
-    const scan = codeOfUnhashedPatch(ask.file, ask.from, ask.now);
+    if (ask.kind === 'claudeCommands') return claudeCommandsKinds(ask.cwd, ask.home, ask.grants);
+    const scan = codeOfUnhashedPatch(ask.file, ask.from, ask.now, ask.maxAgeMs);
     return { all: scan.all, ...(scan.why ? { why: scan.why } : {}) };
   });
 }
@@ -281,8 +281,8 @@ export class TrustOffThread {
     return this.ask({ kind: 'claudeCommands', cwd, home, grants }, lane) as Promise<(ClaudeCommands | undefined)[]>;
   }
 
-  editsAsk(file: string, from: string, now: number): Promise<EditsAsk> {
-    return this.ask({ kind: 'editsAsk', file, from, now }, 'background') as Promise<EditsAsk>;
+  editsAsk(file: string, from: string, now: number, maxAgeMs?: number): Promise<EditsAsk> {
+    return this.ask({ kind: 'editsAsk', file, from, now, ...(maxAgeMs !== undefined ? { maxAgeMs } : {}) }, 'background') as Promise<EditsAsk>;
   }
 
   // Calls from now on don't share a look begun before (forgetFolders: what
@@ -299,7 +299,9 @@ export class TrustOffThread {
   private ask(ask: Ask, lane: Lane): Promise<unknown> {
     if (lane === 'urgent') return this.run(ask, lane);
     // `now` only bounds how old a cached scan may be: not part of the key.
-    const key = JSON.stringify(ask.kind === 'editsAsk' ? [ask.kind, ask.file, ask.from] : ask);
+    // How old it may be is: a caller asking for a fresh one never shares a
+    // look that may answer with an older one (Codex's and Gemini's reviews).
+    const key = JSON.stringify(ask.kind === 'editsAsk' ? [ask.kind, ask.file, ask.from, ask.maxAgeMs ?? null] : ask);
     const going = this.shared.get(key);
     if (going) return going;
     const p = this.run(ask, lane).finally(() => {

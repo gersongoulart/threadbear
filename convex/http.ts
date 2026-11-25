@@ -14,6 +14,7 @@ import { MAX_RUNNER_UPLOAD_BYTES } from './sync';
 import { PHONE_UPLOADS } from './phone';
 import { takeUpload } from './uploads';
 import { safeDecode, withCard } from './shareCard';
+import { promoteRoute } from './boxImage';
 
 const http = httpRouter();
 
@@ -110,13 +111,17 @@ http.route({
   }),
 });
 
+// The box-image workflow promoting the image a new box boots, with a GitHub
+// Actions OIDC token (boxImage.ts says what it checks).
+http.route({ path: '/box-image/promote', method: 'POST', handler: promoteRoute });
+
 // The three upload routes below take their one-use ticket the same way
 // (uploads.ts takeUpload): claimed before the body is read, the body read
 // no further than the cap, and a file the finish doesn't keep deleted.
 
 // A runner key's uploads (sync:iconUploadUrl hands out this URL with a
 // one-use ticket): the file is stored here and recorded as that runner's,
-// so its key can attach it, and only it (docs/protocol.md, "Runner keys").
+// so its key can attach it, and only it (docs/protocol/keys.md, "Runner keys").
 // Answers { storageId } as Convex's own upload URL does, so the runner's
 // uploader is the same for both. 429: over an allowance, try again later;
 // 403: this ticket won't do.

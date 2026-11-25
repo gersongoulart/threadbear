@@ -1,4 +1,4 @@
-// A design review for the phone (docs/protocol.md, "Reviews on the phone"):
+// A design review for the phone (docs/protocol/events.md, "Reviews on the phone"):
 // its words, choices and notes, with each still named by an opaque source
 // instead of its path on this Mac. Nothing path-like goes: not the option's
 // files, its live url, nor the pictures pasted into a draft on the Mac
@@ -53,7 +53,7 @@ export function phoneReview(review: DesignReview, noPreview: ReadonlySet<string>
         return {
           src,
           ...(shot.title ? { title: shot.title } : {}),
-          kind: shot.media?.mediaType === 'text/html' ? 'page' : shot.media ? 'video' : 'image',
+          kind: shot.media?.mediaType === 'text/html' ? 'page' : shot.media?.mediaType.startsWith('audio/') ? 'audio' : shot.media ? 'video' : 'image',
           ...(noPreview.has(src) ? { preview: false } : {}),
         };
       }),

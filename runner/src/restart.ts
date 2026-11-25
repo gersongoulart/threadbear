@@ -6,6 +6,7 @@
 // starts the runner again. The next start reads the file, notes the restart
 // in the threads that asked to carry on, and sends each of them its resume
 // text as a turn of the runner's own.
+import type { ArchiveStatus } from './agent-archive.ts';
 import type { SecretCheckStatus } from './secret-check.ts';
 import type { MacScreenStatus } from './mac-screen.ts';
 import type { UpstreamStatus } from './upstream.ts';
@@ -19,7 +20,7 @@ import type { ThreadStatus, ThreadSummary } from './protocol.ts';
 import { ErrorCode, RpcError } from './protocol.ts';
 import { atomicWriteFileSync, readJsonSync } from './fsutil.ts';
 import { paths, RUNNER_VERSION } from './config.ts';
-import { currentLink, pointCurrentAt, readState, releaseExists } from './release.ts';
+import { currentLink, pointCurrentAt, readState, releaseExists, releaseHome } from './release.ts';
 import type { TimerHandle } from './clock.ts';
 import type { UpdateStatus } from './update.ts';
 
@@ -103,6 +104,8 @@ export type RunnerStatus = {
   // The Convex mirror (src/sync.ts; main.ts adds it).
   sync?: SyncStatus;
   secretCheck?: SecretCheckStatus;
+  // Agent Archive's sync, with the archive experiment on (agent-archive.ts; main.ts adds it).
+  archive?: ArchiveStatus;
   // Dialogs on this Mac's screen and Full Disk Access (mac-screen.ts; main.ts adds it).
   macScreen?: MacScreenStatus;
 };
@@ -130,15 +133,39 @@ export function resumesPath(home: string): string {
 }
 
 // This runner's own bin/ (the release's, or the checkout's when run from
-// source), so a bare `tb` in a thread is there and matches the runner.
+// source). Threads get threadBinDir's, below.
 export const BIN_DIR = path.resolve(import.meta.dirname, '..', 'bin');
+
+// The bin/ a thread's PATH starts with. A CLI outlives the runner that
+// started it (the runner updates itself onto main several times a day) and
+// keeps the PATH it started with, so a release's own bin/ there pins the
+// thread to that release's tb: on 24 Nov a day-old thread's `tb land`
+// still refused with a hold main had taken out, and old releases are
+// pruned, which leaves no tb at all. So a release's runner names
+// <home>/runner/current/bin instead, the link every deploy and rollback
+// moves, which always gets the tb of the release this Mac runs (as
+// ~/.local/bin/tb does, scripts/link-tb.sh). A checkout's runner (a dev
+// runner) keeps its own bin/, and so does Windows, where current is a text
+// file rather than a link (release.ts, currentLink).
+export function threadBinDir(binDir = BIN_DIR, platform: NodeJS.Platform = process.platform): string {
+  if (platform === 'win32') return binDir;
+  const home = releaseHome(path.dirname(binDir));
+  if (!home) return binDir;
+  const current = path.join(home, 'runner', 'current');
+  try {
+    if (fs.lstatSync(current).isSymbolicLink() && fs.statSync(path.join(current, 'bin', 'tb')).isFile()) return path.join(current, 'bin');
+  } catch {
+    // No link, or one to a release without a tb: this release's own.
+  }
+  return binDir;
+}
 
 // Every CLI gets these, so tools an agent runs (tb self, deploy-runner.sh)
 // know which thread and which runner they're in. THREADBEAR_HOME is the one
 // tb reads, and agents point it at a dev runner; THREADBEAR_RUNNER_HOME
 // always names the runner the thread is on, so the scripts' guards against
 // restarting it from inside one of its threads go by that.
-// `key` is the thread's own RPC credential (docs/protocol.md, "A thread's own
+// `key` is the thread's own RPC credential (docs/protocol/connection.md, "A thread's own
 // key"), only for a thread's CLI: a patch's action and a worktree's setup run
 // on the runner's say-so, so tb there still reads the token. The empty value
 // matters: a dev runner started from a thread would otherwise pass its parent
@@ -151,7 +178,7 @@ export function threadEnv(threadId: string, home: string, basePath = process.env
     THREADBEAR_RUNNER_HOME: home,
     THREADBEAR_RUNNER_VERSION: RUNNER_VERSION,
     // A picture copied in here can be on the thread's shared page; one
-    // anywhere else can't (docs/protocol.md, "Sharing").
+    // anywhere else can't (docs/protocol/runners.md, "Sharing").
     THREADBEAR_MEDIA_DIR: paths.media(home, threadId),
     // The Node this runner runs on, which the repo's scripts take before
     // looking on PATH (scripts/find-node.sh): a thread's checks, landing and
@@ -166,7 +193,7 @@ export function threadEnv(threadId: string, home: string, basePath = process.env
     // and Git Bash (Claude's Bash tool there) runs it with whatever node
     // is on PATH, which a fresh PC hasn't got (cmd and PowerShell run
     // tb.cmd, which uses THREADBEAR_NODE).
-    PATH: [BIN_DIR, ...(process.platform === 'win32' ? [path.dirname(process.execPath)] : []), ...(basePath ? [basePath] : [])].join(path.delimiter),
+    PATH: [threadBinDir(), ...(process.platform === 'win32' ? [path.dirname(process.execPath)] : []), ...(basePath ? [basePath] : [])].join(path.delimiter),
   };
 }
 
@@ -448,7 +475,10 @@ export class Restarter {
     // "The runner is restarting" first: the app reads that as a restart
     // under way (RunnerRestart.parse) and keeps its banner quiet while the
     // connection moves to the new runner.
-    this.deps.runner.notice('info', `The runner is restarting onto a new release. ${n === 1 ? '1 busy thread finishes its turn' : `${n} busy threads finish their turns`} on the old one first, then ${n === 1 ? 'moves' : 'move'} across.`);
+    // Onto a new release when one was asked for; after an uncaught error
+    // (main.ts) it's the same release again.
+    const onto = this.pending.release ? ' onto a new release' : '';
+    this.deps.runner.notice('info', `The runner is restarting${onto}. ${n === 1 ? '1 busy thread finishes its turn' : `${n} busy threads finish their turns`} on the old one first, then ${n === 1 ? 'moves' : 'move'} across.`);
     this.defer(() => this.deps.handOver!(keeps));
   }
 
@@ -473,6 +503,12 @@ export class Restarter {
     this.deps.log.info('restarting', { when: this.pending.when, reason: this.pending.reason });
     this.deps.runner.notice('info', pendingMessage(0));
     this.defer(() => this.deps.restart());
+  }
+
+  // A restart or handover has begun (main.ts: an uncaught error then is no
+  // reason for another).
+  get underway(): boolean {
+    return this.restarting;
   }
 
   // main.ts calls this whenever the runner stops, whatever stopped it

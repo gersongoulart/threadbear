@@ -43,11 +43,23 @@ fn is_function_key(key: &str) -> bool {
 
 impl ShortcutKey {
     pub fn new(key: &str) -> Self {
-        Self { key: key.to_string(), command: true, option: false, control: false, shift: false }
+        Self {
+            key: key.to_string(),
+            command: true,
+            option: false,
+            control: false,
+            shift: false,
+        }
     }
 
     pub fn with(key: &str, option: bool, control: bool, shift: bool) -> Self {
-        Self { key: key.to_string(), command: true, option, control, shift }
+        Self {
+            key: key.to_string(),
+            command: true,
+            option,
+            control,
+            shift,
+        }
     }
 
     /// "cmd+opt+down". None for anything that isn't a key (`init(string:)`).
@@ -65,7 +77,13 @@ impl ShortcutKey {
         if !(last.chars().count() == 1 || is_named(&last)) {
             return None;
         }
-        let mut k = Self { key: last, command: false, option: false, control: false, shift: false };
+        let mut k = Self {
+            key: last,
+            command: false,
+            option: false,
+            control: false,
+            shift: false,
+        };
         for part in parts {
             match part.as_str() {
                 "cmd" | "command" => k.command = true,
@@ -99,8 +117,18 @@ impl ShortcutKey {
 
     /// As menus show it: "⌥⌘↓". ⌃ ⌥ ⇧ ⌘ is the order macOS menus show them.
     pub fn display(&self) -> String {
-        let mods = format!("{}{}{}{}", if self.control { "⌃" } else { "" }, if self.option { "⌥" } else { "" }, if self.shift { "⇧" } else { "" }, if self.command { "⌘" } else { "" });
-        let key = NAMED.iter().find(|(n, _)| *n == self.key).map(|(_, s)| s.to_string()).unwrap_or_else(|| self.key.to_uppercase());
+        let mods = format!(
+            "{}{}{}{}",
+            if self.control { "⌃" } else { "" },
+            if self.option { "⌥" } else { "" },
+            if self.shift { "⇧" } else { "" },
+            if self.command { "⌘" } else { "" }
+        );
+        let key = NAMED
+            .iter()
+            .find(|(n, _)| *n == self.key)
+            .map(|(_, s)| s.to_string())
+            .unwrap_or_else(|| self.key.to_uppercase());
         format!("{mods}{key}")
     }
 
@@ -157,30 +185,48 @@ pub enum ShortcutCommand {
     /// ⌘P, a second key for the same box, as code editors have it (Mike, 13
     /// Nov: "⌘P to open it as well"). Threadbear has no Print to clash with.
     OpenAnythingAlso,
+    /// ⇧⌘P, a third key for the same box: VS Code's Command Palette.
+    OpenAnythingPalette,
+    /// ⌘L puts the cursor in the message box, as Cursor's chat and a
+    /// browser's address bar have it.
+    FocusMessageBox,
     ShowInbox,
     ShowScheduled,
     ShowProjects,
     ShowLibrarian,
     ShowHibernating,
     ShowArchived,
-    /// ⇧⌘[ and ⇧⌘]: a project's page tabs (Decisions, Project), as Safari's
-    /// tabs go. Greyed out anywhere else.
-    PreviousTab,
-    NextTab,
     ZoomIn,
     ZoomOut,
     ActualSize,
     ToggleThreads,
     TogglePanels,
     ToggleTerminal,
+    /// ⌘`, a second key for the Terminal, the one Mike reaches for (24 Nov:
+    /// "command tilde usually opens up terminal"). It takes the key from
+    /// macOS's next-window cycling, which only matters with two Threadbear
+    /// windows open.
+    ToggleTerminalAlso,
+    /// ⌘B, a second key for the Threads list: VS Code's sidebar key.
+    ToggleThreadsAlso,
     ResetPanelLayout,
     /// ⌘/ folds the Threads panel away and back, keeping its place and width.
     CollapseThreads,
+    /// ⇧⌘B closes whichever of Runners, Connectors, Updates, Usage and Setup
+    /// are open, and brings the same ones back under the Threads list, which
+    /// stays (Wayne, 22 Nov). The GPUI app's own.
+    ToggleSidebarPanels,
+    /// ⇧⌘A opens the message box's "Attach images or Markdown…" picker. The
+    /// GPUI app's own.
+    AttachFiles,
+    /// ⌘F with a thread showing: the find bar over its transcript. A file
+    /// in the pane keeps ⌘F for its own find bar. The GPUI app's own.
+    FindInThread,
     Settings,
 }
 
 impl ShortcutCommand {
-    pub const ALL: [ShortcutCommand; 27] = [
+    pub const ALL: [ShortcutCommand; 32] = [
         Self::NewThread,
         Self::Archive,
         Self::Hibernate,
@@ -191,22 +237,27 @@ impl ShortcutCommand {
         Self::NextInboxThread,
         Self::OpenAnything,
         Self::OpenAnythingAlso,
+        Self::OpenAnythingPalette,
+        Self::FocusMessageBox,
         Self::ShowInbox,
         Self::ShowScheduled,
         Self::ShowProjects,
         Self::ShowLibrarian,
         Self::ShowHibernating,
         Self::ShowArchived,
-        Self::PreviousTab,
-        Self::NextTab,
         Self::ZoomIn,
         Self::ZoomOut,
         Self::ActualSize,
         Self::ToggleThreads,
         Self::TogglePanels,
         Self::ToggleTerminal,
+        Self::ToggleTerminalAlso,
+        Self::ToggleThreadsAlso,
         Self::ResetPanelLayout,
         Self::CollapseThreads,
+        Self::ToggleSidebarPanels,
+        Self::AttachFiles,
+        Self::FindInThread,
         Self::Settings,
     ];
 
@@ -222,22 +273,27 @@ impl ShortcutCommand {
             Self::NextInboxThread => "nextInboxThread",
             Self::OpenAnything => "openAnything",
             Self::OpenAnythingAlso => "openAnythingAlso",
+            Self::OpenAnythingPalette => "openAnythingPalette",
+            Self::FocusMessageBox => "focusMessageBox",
             Self::ShowInbox => "showInbox",
             Self::ShowScheduled => "showScheduled",
             Self::ShowProjects => "showProjects",
             Self::ShowLibrarian => "showLibrarian",
             Self::ShowHibernating => "showHibernating",
             Self::ShowArchived => "showArchived",
-            Self::PreviousTab => "previousTab",
-            Self::NextTab => "nextTab",
             Self::ZoomIn => "zoomIn",
             Self::ZoomOut => "zoomOut",
             Self::ActualSize => "actualSize",
             Self::ToggleThreads => "toggleThreads",
             Self::TogglePanels => "togglePanels",
             Self::ToggleTerminal => "toggleTerminal",
+            Self::ToggleTerminalAlso => "toggleTerminalAlso",
+            Self::ToggleThreadsAlso => "toggleThreadsAlso",
             Self::ResetPanelLayout => "resetPanelLayout",
             Self::CollapseThreads => "collapseThreads",
+            Self::ToggleSidebarPanels => "toggleSidebarPanels",
+            Self::AttachFiles => "attachFiles",
+            Self::FindInThread => "findInThread",
             Self::Settings => "settings",
         }
     }
@@ -258,22 +314,27 @@ impl ShortcutCommand {
             Self::NextInboxThread => "Next Inbox Thread",
             Self::OpenAnything => "Open Anything",
             Self::OpenAnythingAlso => "Open Anything (second key)",
+            Self::OpenAnythingPalette => "Open Anything (third key)",
+            Self::FocusMessageBox => "Go to Message Box",
             Self::ShowInbox => "Show Inbox",
             Self::ShowScheduled => "Show Scheduled",
             Self::ShowProjects => "Show Projects",
             Self::ShowLibrarian => "Show Librarian",
             Self::ShowHibernating => "Show Hibernating",
             Self::ShowArchived => "Show Archived",
-            Self::PreviousTab => "Show Previous Tab",
-            Self::NextTab => "Show Next Tab",
             Self::ZoomIn => "Zoom In",
             Self::ZoomOut => "Zoom Out",
             Self::ActualSize => "Actual Size",
             Self::ToggleThreads => "Show Threads",
             Self::TogglePanels => "Show Panels",
             Self::ToggleTerminal => "Show Terminal",
+            Self::ToggleTerminalAlso => "Show Terminal (second key)",
+            Self::ToggleThreadsAlso => "Show Threads (second key)",
             Self::ResetPanelLayout => "Reset Panel Layout",
             Self::CollapseThreads => "Collapse Threads",
+            Self::ToggleSidebarPanels => "Show Sidebar Panels",
+            Self::AttachFiles => "Attach Images or Markdown",
+            Self::FindInThread => "Find in Thread",
             Self::Settings => "Settings…",
         }
     }
@@ -287,11 +348,11 @@ impl ShortcutCommand {
             Self::CopyTranscript => Some(ShortcutKey::with("c", false, false, true)),
             Self::Back => Some(ShortcutKey::new("[")),
             Self::Forward => Some(ShortcutKey::new("]")),
-            Self::PreviousTab => Some(ShortcutKey::with("[", false, false, true)),
-            Self::NextTab => Some(ShortcutKey::with("]", false, false, true)),
             Self::NextInboxThread => Some(ShortcutKey::with("down", true, false, false)),
             Self::OpenAnything => Some(ShortcutKey::new("k")),
             Self::OpenAnythingAlso => Some(ShortcutKey::new("p")),
+            Self::OpenAnythingPalette => Some(ShortcutKey::with("p", false, false, true)),
+            Self::FocusMessageBox => Some(ShortcutKey::new("l")),
             Self::ShowInbox => Some(ShortcutKey::new("1")),
             Self::ShowScheduled => Some(ShortcutKey::new("2")),
             Self::ShowProjects => Some(ShortcutKey::new("3")),
@@ -304,8 +365,18 @@ impl ShortcutCommand {
             Self::TogglePanels => Some(ShortcutKey::with("p", true, false, false)),
             // VS Code's and T3 Code's key for their terminal.
             Self::ToggleTerminal => Some(ShortcutKey::new("j")),
+            Self::ToggleTerminalAlso => Some(ShortcutKey::new("`")),
+            Self::ToggleThreadsAlso => Some(ShortcutKey::new("b")),
             Self::CollapseThreads => Some(ShortcutKey::new("/")),
-            Self::Hibernate | Self::ShowHibernating | Self::ShowArchived | Self::ResetPanelLayout => None,
+            Self::ToggleSidebarPanels => Some(ShortcutKey::with("b", false, false, true)),
+            // A for attach; ⌘U and ⌘O stay free for formatting and opening.
+            Self::AttachFiles => Some(ShortcutKey::with("a", false, false, true)),
+            // Every editor's and browser's key for finding words.
+            Self::FindInThread => Some(ShortcutKey::new("f")),
+            Self::Hibernate
+            | Self::ShowHibernating
+            | Self::ShowArchived
+            | Self::ResetPanelLayout => None,
         }
     }
 }
@@ -329,7 +400,9 @@ impl ShortcutBindings {
     /// line only loses that line.
     pub fn parse(json: &str) -> Result<Self, String> {
         let value: Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
-        let Value::Object(map) = value else { return Err("not an object".into()) };
+        let Value::Object(map) = value else {
+            return Err("not an object".into());
+        };
         let mut out = Self::default();
         for (name, value) in map {
             let Some(command) = ShortcutCommand::from_name(&name) else {
@@ -346,10 +419,12 @@ impl ShortcutBindings {
             };
             match value {
                 Value::Null => out.set(command, None),
-                Value::String(text) => match ShortcutKey::parse(&text).filter(|k| !k.types_instead()) {
-                    Some(key) => out.set(command, Some(key)),
-                    None => out.problems.push(format!("{name}: {text}")),
-                },
+                Value::String(text) => {
+                    match ShortcutKey::parse(&text).filter(|k| !k.types_instead()) {
+                        Some(key) => out.set(command, Some(key)),
+                        None => out.problems.push(format!("{name}: {text}")),
+                    }
+                }
                 other => out.problems.push(format!("{name}: {other}")),
             }
         }
@@ -364,10 +439,18 @@ impl ShortcutBindings {
         }
         let mut map = Map::new();
         for (command, key) in &self.changes {
-            map.insert(command.name().to_string(), key.as_ref().map(|k| Value::String(k.string())).unwrap_or(Value::Null));
+            map.insert(
+                command.name().to_string(),
+                key.as_ref()
+                    .map(|k| Value::String(k.string()))
+                    .unwrap_or(Value::Null),
+            );
         }
         for (name, value) in &self.others {
-            map.insert(name.clone(), value.clone().map(Value::String).unwrap_or(Value::Null));
+            map.insert(
+                name.clone(),
+                value.clone().map(Value::String).unwrap_or(Value::Null),
+            );
         }
         serde_json::to_string_pretty(&Value::Object(map)).ok()
     }
@@ -392,8 +475,15 @@ impl ShortcutBindings {
     }
 
     /// The command on this key, other than `except`.
-    pub fn command_using(&self, key: &ShortcutKey, except: Option<ShortcutCommand>) -> Option<ShortcutCommand> {
-        ShortcutCommand::ALL.iter().copied().find(|c| Some(*c) != except && self.key(*c).as_ref() == Some(key))
+    pub fn command_using(
+        &self,
+        key: &ShortcutKey,
+        except: Option<ShortcutCommand>,
+    ) -> Option<ShortcutCommand> {
+        ShortcutCommand::ALL
+            .iter()
+            .copied()
+            .find(|c| Some(*c) != except && self.key(*c).as_ref() == Some(key))
     }
 }
 
@@ -409,7 +499,11 @@ mod tests {
     fn a_key_reads_and_writes_the_way_the_file_says_it() {
         assert_eq!(ShortcutKey::new("n"), key("cmd+n"));
         assert_eq!(key("cmd+opt+down").string(), "cmd+opt+down");
-        assert_eq!(key("shift+cmd+c").string(), "cmd+shift+c", "the same order however it was written");
+        assert_eq!(
+            key("shift+cmd+c").string(),
+            "cmd+shift+c",
+            "the same order however it was written"
+        );
         assert_eq!(key("CTRL+J").string(), "ctrl+j");
         assert_eq!(key("alt+cmd+p"), key("opt+cmd+p"));
         assert_eq!(key("cmd++").key, "+", "a plus sign is a key too");
@@ -454,19 +548,73 @@ mod tests {
 
     #[test]
     fn the_defaults_are_the_twenty_seven_in_the_menus() {
-        let keys: Vec<ShortcutKey> = ShortcutCommand::ALL.iter().filter_map(|c| c.default_key()).collect();
+        let keys: Vec<ShortcutKey> = ShortcutCommand::ALL
+            .iter()
+            .filter_map(|c| c.default_key())
+            .collect();
         let unique: std::collections::HashSet<&ShortcutKey> = keys.iter().collect();
-        assert_eq!(keys.len(), unique.len(), "two commands can't start on one key");
-        assert_eq!(ShortcutCommand::ALL.len(), 27);
+        assert_eq!(
+            keys.len(),
+            unique.len(),
+            "two commands can't start on one key"
+        );
+        assert_eq!(ShortcutCommand::ALL.len(), 32);
         // The Swift app's names and keys, as both apps read shortcuts.json.
-        assert_eq!(ShortcutCommand::from_name("previousTab"), Some(ShortcutCommand::PreviousTab));
-        assert_eq!(ShortcutCommand::PreviousTab.default_key(), Some(key("cmd+shift+[")));
-        assert_eq!(ShortcutCommand::NextTab.default_key(), Some(key("cmd+shift+]")));
-        assert_eq!(ShortcutCommand::NextTab.default_key().unwrap().display(), "⇧⌘]");
-        assert_eq!(ShortcutCommand::NextTab.default_key().unwrap().chord(true), "shift-cmd-]");
-        assert_eq!(ShortcutCommand::OpenAnything.default_key(), Some(key("cmd+k")));
-        assert_eq!(ShortcutCommand::OpenAnythingAlso.default_key(), Some(key("cmd+p")));
-        assert_eq!(ShortcutCommand::CollapseThreads.default_key(), Some(key("cmd+/")));
+        assert_eq!(
+            ShortcutCommand::OpenAnything.default_key(),
+            Some(key("cmd+k"))
+        );
+        assert_eq!(
+            ShortcutCommand::OpenAnythingAlso.default_key(),
+            Some(key("cmd+p"))
+        );
+        assert_eq!(
+            ShortcutCommand::ToggleTerminalAlso.default_key(),
+            Some(key("cmd+`"))
+        );
+        assert_eq!(
+            ShortcutCommand::ToggleTerminalAlso
+                .default_key()
+                .unwrap()
+                .chord(true),
+            "cmd-`"
+        );
+        assert_eq!(
+            ShortcutCommand::ToggleThreadsAlso.default_key(),
+            Some(key("cmd+b"))
+        );
+        assert_eq!(
+            ShortcutCommand::OpenAnythingPalette.default_key(),
+            Some(key("cmd+shift+p"))
+        );
+        assert_eq!(
+            ShortcutCommand::FocusMessageBox.default_key(),
+            Some(key("cmd+l"))
+        );
+        assert_eq!(
+            ShortcutCommand::from_name("toggleTerminalAlso"),
+            Some(ShortcutCommand::ToggleTerminalAlso)
+        );
+        assert_eq!(
+            ShortcutCommand::CollapseThreads.default_key(),
+            Some(key("cmd+/"))
+        );
+        assert_eq!(
+            ShortcutCommand::ToggleSidebarPanels.default_key(),
+            Some(key("cmd+shift+b"))
+        );
+        assert_eq!(
+            ShortcutCommand::AttachFiles.default_key(),
+            Some(key("cmd+shift+a"))
+        );
+        assert_eq!(
+            ShortcutCommand::from_name("toggleSidebarPanels"),
+            Some(ShortcutCommand::ToggleSidebarPanels)
+        );
+        assert_eq!(
+            ShortcutCommand::from_name("attachFiles"),
+            Some(ShortcutCommand::AttachFiles)
+        );
     }
 
     #[test]
@@ -479,9 +627,13 @@ mod tests {
         let read = ShortcutBindings::parse(&text).unwrap();
         assert_eq!(read.key(ShortcutCommand::Archive), Some(key("cmd+k")));
         assert_eq!(read.key(ShortcutCommand::Stop), None);
-        assert_eq!(read.key(ShortcutCommand::NewThread), Some(key("cmd+n")), "the rest stay at their defaults");
+        assert_eq!(
+            read.key(ShortcutCommand::NewThread),
+            Some(key("cmd+n")),
+            "the rest stay at their defaults"
+        );
         // Setting it back to the default is no change at all.
-        let mut back = read.clone();
+        let mut back = read;
         back.set(ShortcutCommand::Archive, Some(key("cmd+e")));
         assert!(!back.is_changed(ShortcutCommand::Archive));
     }
@@ -490,7 +642,8 @@ mod tests {
     fn a_half_done_edit_keeps_the_keys_in_use() {
         assert!(ShortcutBindings::parse("{ not json").is_err());
         assert!(ShortcutBindings::parse("[1, 2]").is_err());
-        let read = ShortcutBindings::parse("{\"archive\": \"banana\", \"newThread\": \"cmd+t\"}").unwrap();
+        let read =
+            ShortcutBindings::parse("{\"archive\": \"banana\", \"newThread\": \"cmd+t\"}").unwrap();
         assert_eq!(read.problems.len(), 1, "the bad line only loses that line");
         assert_eq!(read.key(ShortcutCommand::NewThread), Some(key("cmd+t")));
         assert_eq!(read.key(ShortcutCommand::Archive), Some(key("cmd+e")));
@@ -500,5 +653,12 @@ mod tests {
     fn unknown_commands_stay_in_the_file() {
         let read = ShortcutBindings::parse("{\"somethingNewer\": \"cmd+z\"}").unwrap();
         assert!(read.json().unwrap().contains("somethingNewer"));
+        // The project page's tab keys, taken out with the projectDecisions
+        // experiment (24 Nov 2026): a file naming them still reads, and keeps
+        // them for the Swift app, which still has them.
+        assert_eq!(ShortcutCommand::from_name("previousTab"), None);
+        let read = ShortcutBindings::parse("{\"previousTab\": \"cmd+shift+9\"}").unwrap();
+        assert!(read.problems.is_empty());
+        assert!(read.json().unwrap().contains("previousTab"));
     }
 }

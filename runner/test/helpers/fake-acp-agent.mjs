@@ -15,6 +15,23 @@
 // so the real guard script is what decides. More words for it:
 //   "read <path>"          its read_file tool
 //   "mcp <server__tool>"   an MCP tool, through its use_tool
+//   "broke"                a login out of balance, as Grok 1.0.92 answered on
+//                          23 Nov 2026: no model call, a failed retry_state and
+//                          turn_completed, and "Internal error" with the real
+//                          reason in data (GROK_OUT_OF_BALANCE below)
+// and it answers _x.ai/billing with FAKE_GROK_BILLING (JSON), else a plan
+// with 40% of its week used.
+//
+// FAKE_ACP_NAME=Antigravity follows Google's antigravity-acp 1.4.5 (20 Nov
+// 2026): it writes skills/system/run-workflow/SKILL.md into the session's cwd
+// as a session opens, asks before every tool in its default mode, and its
+// shell tool's arguments are CommandLine and Cwd. "exec <command>" runs in
+// the first additional directory (where it was told the work is), "read
+// <path>" is its view_file. Its session/new says the plan's tier, it lists
+// its slash commands just after, and "/usage" is answered by the server with
+// FAKE_ACP_USAGE (or 1.4.5's answer of 23 Nov 2026), with no model turn.
+// FAKE_ACP_NO_USAGE_COMMAND leaves it out of the list, and "/usage" then goes
+// to the model as any prompt would.
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -37,12 +54,18 @@ const ask = (method, params) =>
   });
 
 const GROK = AGENT === 'Grok';
+const AGY = AGENT === 'Antigravity';
 const sessions = new Map();
-let mode = 'build';
-let model = GROK ? 'grok-4.7' : 'fake/one';
+let mode = AGENT === 'Antigravity' ? 'default' : 'build';
+let model = GROK ? 'grok-4.7' : AGENT === 'Antigravity' ? 'gemini-3.8-flash' : 'fake/one';
 let effort = 'high';
 const configOptions = () =>
-  GROK
+  AGY
+    ? [
+        { id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: model, options: [{ value: 'gemini-4-neon', name: 'Gemini 4 Neon' }, { value: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' }] },
+        { id: 'mode', name: 'Session Mode', category: 'mode', type: 'select', currentValue: mode, options: [{ value: 'default' }, { value: 'auto_edit' }, { value: 'yolo' }] },
+      ]
+    : GROK
     ? [
         { id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: model, options: [{ value: 'grok-4.7', name: 'Grok 4.7' }, { value: 'grok-4.5', name: 'Grok 4.5' }] },
         { id: 'reasoning_effort', name: 'Reasoning Effort', category: 'thought_level', type: 'select', currentValue: effort, options: [{ value: 'xhigh' }, { value: 'high' }, { value: 'medium' }, { value: 'low' }] },
@@ -145,8 +168,24 @@ async function grokTool(sessionId, cwd, kind, title, toolName, input, run) {
   update(sessionId, { sessionUpdate: 'tool_call_update', toolCallId, status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'done' } }] });
 }
 
+// Grok 1.0.92's frames for a login out of balance (thread ce78609c, 23 Nov
+// 2026), trimmed to what matters, with its own ids left out.
+const OUT_OF_BALANCE = 'API error (status 402 Payment Required): Grok Build usage balance exhausted';
+const GROK_OUT_OF_BALANCE = {
+  retry: { sessionUpdate: 'retry_state', type: 'failed', error_type: 'api', message: OUT_OF_BALANCE },
+  completed: { sessionUpdate: 'turn_completed', stop_reason: 'error', agent_result: OUT_OF_BALANCE, error: { code: -32603, message: 'Internal error', data: { message: OUT_OF_BALANCE, http_status: 402 } }, elapsed_ms: 1368 },
+  answer: { code: -32603, message: 'Internal error', data: { message: OUT_OF_BALANCE, http_status: 402 } },
+};
+
 async function grokPrompt(id, p, s, word, rest) {
   reportHooks(p.sessionId, 'user_prompt_submit', grokPlugin(s.cwd));
+  if (word === 'broke') {
+    const note = (update) => send({ method: '_x.ai/session_notification', params: { sessionId: p.sessionId, update } });
+    note(GROK_OUT_OF_BALANCE.retry);
+    note(GROK_OUT_OF_BALANCE.completed);
+    // FAKE_GROK_BARE_ERROR: an answer with no data, so only the notes say why.
+    return send({ id, error: env.FAKE_GROK_BARE_ERROR ? { code: -32603, message: 'Internal error' } : GROK_OUT_OF_BALANCE.answer });
+  }
   // A model starts with a thought, and a stopped process stops here.
   update(p.sessionId, { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'hmm' } });
   await new Promise((r) => setTimeout(r, 50));
@@ -185,6 +224,11 @@ function deniesAll() {
 }
 
 function openedSession(cwd) {
+  if (AGY) {
+    fs.mkdirSync(path.join(cwd, 'skills', 'system', 'run-workflow'), { recursive: true });
+    fs.writeFileSync(path.join(cwd, 'skills', 'system', 'run-workflow', 'SKILL.md'), 'a skill');
+    return;
+  }
   if (env.OPENCODE_DISABLE_PROJECT_CONFIG !== '1' && !process.argv.includes('--pure')) {
     const plugin = path.join(cwd, '.opencode', 'plugins', 'run.txt');
     if (fs.existsSync(plugin)) fs.writeFileSync(fs.readFileSync(plugin, 'utf8').trim(), 'plugin ran');
@@ -231,6 +275,7 @@ async function prompt(id, p) {
   const [word, ...rest] = last.split(' ');
   if (word === 'hang') return; // answers only session/cancel
   if (GROK) return grokPrompt(id, p, s, word, rest);
+  if (AGY) return agyPrompt(id, p, s, word, rest);
   if (word === 'write') await runTool(p.sessionId, s.cwd, 'edit', { filePath: rest[0], content: rest.slice(1).join(' ') }, [{ path: rest[0] }], () => fs.writeFileSync(rest[0], rest.slice(1).join(' ')));
   else if (word === 'exec') await runTool(p.sessionId, s.cwd, 'execute', { command: rest.join(' ') }, [], () => log({ ran: rest.join(' ') }));
   // OpenCode 2's question tool, as a form (when the client offered forms).
@@ -260,6 +305,93 @@ async function prompt(id, p) {
   send({ id, result: { stopReason: 'end_turn' } });
 }
 
+const AGY_USAGE = `### Session Usage
+- **Session total:** data not available yet
+
+### Quota Limits
+- **Gemini Models**
+  *(Models within this group: Gemini 4 Neon, Gemini 4 Carbon, Gemini 4 Argon, Gemini 4 Hydrogen, Gemini 3.8 Flash)*
+  - **Weekly Limit Remaining:** 55% remaining (resets Nov 28, 2026, 08:49 UTC)
+  - **Five Hour Limit Remaining:** 91% remaining (resets Nov 23, 2026, 09:35 UTC)
+- **Claude and GPT models**
+  *(Models within this group: Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B)*
+  - **Weekly Limit Remaining:** 100% remaining (resets Nov 30, 2026, 05:08 UTC)
+  - **Five Hour Limit Remaining:** 100% remaining (resets Nov 23, 2026, 10:08 UTC)
+`;
+
+async function agyPrompt(id, p, s, word, rest) {
+  if (word === '/usage' && !env.FAKE_ACP_NO_USAGE_COMMAND) {
+    log({ usageCommand: true });
+    update(p.sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: env.FAKE_ACP_USAGE ?? AGY_USAGE } });
+    return send({ id, result: { stopReason: 'end_turn' } });
+  }
+  const tool = async (kind, title, rawInput, extra, run) => {
+    const toolCallId = `call-${Math.random().toString(36).slice(2)}`;
+    update(p.sessionId, { sessionUpdate: 'tool_call', toolCallId, title, kind, status: 'pending', rawInput });
+    const r = await ask('session/request_permission', {
+      sessionId: p.sessionId,
+      toolCall: { toolCallId, kind, status: 'pending', title, rawInput, ...extra },
+      options: [
+        { optionId: 'allow_always', name: 'Allow Always (risky)', kind: 'allow_always' },
+        { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+      ],
+    });
+    log({ answered: r, kind });
+    if (r.outcome?.outcome !== 'selected' || r.outcome.optionId !== 'allow') {
+      update(p.sessionId, { sessionUpdate: 'tool_call_update', toolCallId, status: 'failed' });
+      return;
+    }
+    run();
+    update(p.sessionId, { sessionUpdate: 'tool_call_update', toolCallId, status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'done' } }] });
+  };
+  const where = s.dirs?.[0] ?? s.cwd;
+  if (word === 'exec') await tool('execute', rest.join(' '), { CommandLine: rest.join(' '), Cwd: where, WaitMsBeforeAsync: 5000 }, {}, () => log({ ran: rest.join(' '), in: where }));
+  else if (word === 'read') await tool('read', 'Running view_file', { AbsolutePath: rest[0] }, { locations: [{ path: rest[0] }] }, () => log({ read: rest[0] }));
+  // Any arguments, as JSON: "execraw {...}", "readraw {...}".
+  else if (word === 'execraw') await tool('execute', 'cmd', JSON.parse(rest.join(' ')), {}, () => log({ ran: JSON.parse(rest.join(' ')) }));
+  else if (word === 'readraw') {
+    const input = JSON.parse(rest.join(' '));
+    await tool('read', 'Running view_file', input, input.AbsolutePath ? { locations: [{ path: input.AbsolutePath }] } : {}, () => log({ read: input }));
+  }
+  // Its create_file, as its frames were on 20 Nov 2026 (1.4.5): a pending
+  // "Run create_file?" tool_call and the permission request under an id of
+  // their own; once allowed, the tool runs as edit_file under the session's
+  // step id, and the request's id is called failed ("approved but never
+  // executed") at the end.
+  else if (word === 'create') {
+    const file = rest[0];
+    const text = rest.slice(1).join(' ');
+    const asked = Math.random().toString(16).slice(2).padEnd(32, '0');
+    const proposed = { toolCallId: asked, title: 'Run create_file?', kind: 'edit', status: 'pending', content: [{ path: file, newText: text, _meta: { kind: 'add' }, type: 'diff' }], locations: [{ path: file }], rawInput: { CodeContent: text, Description: 'make it', Overwrite: true, TargetFile: file } };
+    update(p.sessionId, { sessionUpdate: 'tool_call', ...proposed });
+    const r = await ask('session/request_permission', {
+      sessionId: p.sessionId,
+      toolCall: proposed,
+      options: [
+        { optionId: 'allow_always', name: 'Allow Always (risky)', kind: 'allow_always' },
+        { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+      ],
+    });
+    log({ answered: r, kind: 'edit' });
+    if (r.outcome?.outcome === 'selected' && r.outcome.optionId === 'allow') {
+      const step = `${p.sessionId}:${++s.steps}`;
+      update(p.sessionId, { sessionUpdate: 'tool_call', toolCallId: step, title: 'Running edit_file', kind: 'edit', status: 'in_progress', rawInput: { file_path: file } });
+      fs.writeFileSync(file, text);
+      update(p.sessionId, { sessionUpdate: 'tool_call_update', toolCallId: step, status: 'completed', rawOutput: 'Create the file' });
+    }
+    // At the turn's end it calls the request's id failed.
+    update(p.sessionId, { sessionUpdate: 'tool_call_update', toolCallId: asked, status: 'failed', rawOutput: 'Tool call was approved but never executed.' });
+  }
+  else if (word === 'mcp') {
+    const [server, name] = rest[0].split('__');
+    await tool('other', `${server}_${name}`, { arguments: {}, }, { _meta: { mcp: { tool: name, server }, is_mcp_tool_call: true } }, () => log({ mcp: rest[0] }));
+  }
+  update(p.sessionId, { sessionUpdate: 'agent_message_chunk', messageId: 'm1', content: { type: 'text', text: 'done' } });
+  send({ id, result: { stopReason: 'end_turn' } });
+}
+
 let clientForms = false;
 const handlers = {
   initialize: (p) => (
@@ -267,26 +399,48 @@ const handlers = {
     {
     ...(env.FAKE_ACP_VERSION === 'none' ? {} : { protocolVersion: env.FAKE_ACP_VERSION ? Number(env.FAKE_ACP_VERSION) : 1 }),
     agentCapabilities: { loadSession: true, mcpCapabilities: { http: true }, promptCapabilities: { image: true }, sessionCapabilities: { resume: {}, close: {} } },
-    ...(GROK
+    ...(AGY
+      ? { authMethods: [{ id: 'oauth-personal', name: 'Log in with Google' }], agentInfo: { name: 'antigravity-acp', title: 'Google Antigravity', version: '1.4.5' } }
+      : GROK
       ? { authMethods: [{ id: 'cached_token', name: 'cached_token' }, { id: 'grok.com', name: 'Grok' }], _meta: { grokShell: true, agentVersion: '1.0.77' } }
       : { authMethods: AGENT === 'Cursor' ? [{ id: 'cursor_login', name: 'Log in' }] : [{ id: 'opencode-login', name: 'Log in' }], agentInfo: { name: AGENT, version: '9.9.9' } }),
   }),
   'session/new': (p) => {
     if (env.FAKE_ACP_NEEDS_LOGIN) throw Object.assign(new Error('Authentication required'), { code: -32000 });
     const sessionId = `ses-${Math.random().toString(36).slice(2)}`;
-    sessions.set(sessionId, { cwd: p.cwd });
+    sessions.set(sessionId, { cwd: p.cwd, dirs: p.additionalDirectories, steps: 0 });
     openedSession(p.cwd);
-    log({ newSession: { cwd: p.cwd, mcpServers: p.mcpServers } });
+    log({ newSession: { cwd: p.cwd, mcpServers: p.mcpServers, ...(p.additionalDirectories ? { additionalDirectories: p.additionalDirectories } : {}) } });
+    if (AGY) {
+      const commands = [{ name: 'plan', description: 'Plan carefully' }, { name: 'logout', description: 'Log out' }, ...(env.FAKE_ACP_NO_USAGE_COMMAND ? [] : [{ name: 'usage', description: 'Show model token usage and quota limits.' }])];
+      setImmediate(() => update(sessionId, { sessionUpdate: 'available_commands_update', availableCommands: commands }));
+      return { sessionId, configOptions: configOptions(), _meta: { antigravity: { tier: { name: 'Google AI Ultra', id: 'g1-ultra-lite-tier' } } } };
+    }
     return { sessionId, configOptions: configOptions(), ...(GROK ? { models: grokModels() } : {}) };
   },
   'session/resume': (p) => {
     if (p.sessionId === 'gone') throw Object.assign(new Error('session not found'), { code: -32002 });
-    sessions.set(p.sessionId, { cwd: p.cwd });
+    sessions.set(p.sessionId, { cwd: p.cwd, dirs: p.additionalDirectories, steps: 0 });
     openedSession(p.cwd);
-    log({ resumed: p.sessionId });
+    log({ resumed: p.sessionId, cwd: p.cwd, ...(p.additionalDirectories ? { additionalDirectories: p.additionalDirectories } : {}) });
     return { configOptions: configOptions() };
   },
   'session/close': () => ({}),
+  // Grok's own: how much of the plan is used (adapters/acp/grok-billing.ts).
+  ...(GROK
+    ? {
+        '_x.ai/billing': () => {
+          log({ billing: true });
+          // A Grok that dies before it answers.
+          if (env.FAKE_GROK_EXIT_ON_BILLING) process.exit(1);
+          if (env.FAKE_GROK_BILLING) return JSON.parse(env.FAKE_GROK_BILLING);
+          return {
+            config: { creditUsagePercent: 40, currentPeriod: { type: 'USAGE_PERIOD_TYPE_WEEKLY', start: '2026-11-18T06:53:23.471544+00:00', end: '2026-11-25T06:53:23.471544+00:00' }, onDemandCap: { val: 0 }, onDemandUsed: { val: 0 }, prepaidBalance: { val: 0 }, isUnifiedBillingUser: true },
+            subscription_tier: 'X Premium+',
+          };
+        },
+      }
+    : {}),
   'session/set_config_option': (p) => {
     if (env.FAKE_ACP_NO_SET_MODE && p.configId === 'mode') throw new Error('no such mode');
     if (p.configId === 'mode' && !env.FAKE_ACP_IGNORE_MODE) mode = p.value;

@@ -1,4 +1,4 @@
-// The runner's own small-model calls (docs/protocol.md, "Settings and
+// The runner's own small-model calls (docs/protocol/settings.md, "Settings and
 // models"): classify, extract, summarize and generate, on one of the Claude
 // logins in a pool, through the official CLI. Features ask for a job, not
 // a model; ROUTES says which model answers it. A call never throws: a
@@ -273,7 +273,10 @@ export class Models {
         });
         if (res.ok && value !== undefined) {
           this.lastLogin = account.id;
-          return { ok: true, value, model: `${model} on ${account.id}`, ...tokensOf(res), ...(res.notionalUsd !== undefined ? { notionalUsd: res.notionalUsd } : {}) };
+          // Another provider's agent answers on its own default, not the
+          // Claude model asked for, so its label says so: a caller acting
+          // only on Opus's answer (the quiet inbox) can tell.
+          return { ok: true, value, model: `${askable === 'claude' ? model : `${askable} default`} on ${account.id}`, ...tokensOf(res), ...(res.notionalUsd !== undefined ? { notionalUsd: res.notionalUsd } : {}) };
         }
         if (!res.ok && res.limit) {
           this.opts.poolHost?.ranDry(account.id);

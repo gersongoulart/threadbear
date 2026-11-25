@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import type { Dump } from '../support/driver.ts';
 import type { ThreadbearWorld } from '../support/world.ts';
 
-type Login = { name: string; provider?: string | null; status?: string | null; logo?: string; line?: string | null; ring?: number | null; why?: string | null; signInEnds?: string | null; yearToken?: string | null; tokenButton?: boolean; findWork?: boolean; findingWork?: boolean; meters: { title: string; left: string; verdict?: string | null }[]; more: string[] };
+type Login = { name: string; open?: boolean; provider?: string | null; status?: string | null; logo?: string; line?: string | null; ring?: number | null; why?: string | null; signInEnds?: string | null; yearToken?: string | null; tokenButton?: boolean; findWork?: boolean; findingWork?: boolean; meters: { title: string; left: string; verdict?: string | null }[]; more: string[] };
 type Usage = {
   shown: boolean;
   icon: { percent: number; login?: string | null; tip: string; dot?: boolean };
@@ -141,7 +141,7 @@ When("{string}'s week resets", async function (this: ThreadbearWorld, account: s
   await setWeek(this, account, 100);
 });
 
-/** Marks a login on the mock as the runner's sign-in check would (docs/protocol.md, Pools, "Signed out"). */
+/** Marks a login on the mock as the runner's sign-in check would (docs/protocol/settings.md, Pools, "Signed out"). */
 async function setSignIn(world: ThreadbearWorld, account: string, change: { signedOut?: boolean; loginEndsAt?: string; planEnded?: boolean; yearToken?: { madeAt: string } }) {
   const { accounts } = answer(await world.app.do({ cmd: 'mock', method: 'accounts', params: {} })) as { accounts: { id: string; signedOut?: boolean; loginEndsAt?: string }[] };
   const a = accounts.find((x) => x.id === account);
@@ -197,4 +197,34 @@ Then("a line of the honey pot's tooltip starts {string}", async function (this: 
 
 Then('there is one thread called {string}', async function (this: ThreadbearWorld, title: string) {
   await this.until(`one "${title}" in the sidebar`, (d) => d.sidebar.sections.flatMap((s) => s.threads).filter((t) => t.title === title).length === 1);
+});
+
+When("I click {string}'s row in the Usage panel", async function (this: ThreadbearWorld, account: string) {
+  await this.app.do({ cmd: 'usage', open: account });
+});
+
+Then('in the {string} card, {string} is open', async function (this: ThreadbearWorld, card: string, name: string) {
+  await this.until(`${name} in ${card} open`, (d) => login(d, card, name)?.open === true);
+});
+
+Then('in the {string} card, {string} is shut', async function (this: ThreadbearWorld, card: string, name: string) {
+  await this.until(`${name} in ${card} shut`, (d) => login(d, card, name)?.open === false);
+});
+
+/** A Gemini login with the reading the runner takes from its /usage (agy-usage.ts). */
+When("a Gemini login with its plan's usage is added", async function (this: ThreadbearWorld) {
+  const { accounts } = answer(await this.app.do({ cmd: 'mock', method: 'accounts', params: {} })) as { accounts: object[] };
+  const day = 86_400_000;
+  const at = (ms: number) => new Date(Date.now() + ms).toISOString();
+  const usage = {
+    windows: [
+      { kind: 'five_hour', title: '5-hour', remainingPercent: 91, resetsAt: at(3 * 3_600_000) },
+      { kind: 'weekly', title: 'Weekly', remainingPercent: 55, resetsAt: at(5 * day) },
+      { kind: 'weekly_model', title: 'Weekly Claude and GPT', remainingPercent: 100, resetsAt: at(6 * day) },
+      { kind: 'other', title: '5-hour Claude and GPT', remainingPercent: 100, resetsAt: at(4 * 3_600_000) },
+    ],
+    readAt: new Date().toISOString(),
+    source: 'live',
+  };
+  await this.app.do({ cmd: 'mock', method: 'accounts', params: { accounts: [...accounts, { id: 'antigravity-main', provider: 'antigravity', title: 'Gemini', plan: 'Google AI Ultra', configDir: '~/.gemini/antigravity-acp', models: [], usage }] } });
 });

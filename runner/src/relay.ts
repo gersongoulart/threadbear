@@ -1,4 +1,4 @@
-// Other runners' threads through the backend (docs/protocol.md, "Other
+// Other runners' threads through the backend (docs/protocol/runners.md, "Other
 // runners' threads through the backend"; full Convex step 5). The Mac app
 // asks its own runner about another runner's thread as it would about one of
 // this runner's, and this answers from the backend: the thread's message rows
@@ -9,7 +9,7 @@
 // The backend has a thread's text, one line per tool call, its open approval
 // and its card. A tool row's result says the output is kept on that runner, and
 // carries `heldBack: { seq }`: opening that tool in the app asks for it
-// (threads.heldBody), and if that runner has full sync on (docs/full-convex.md
+// (threads.heldBody), and if that runner has full sync on (docs/archive/full-convex.md
 // step 4) its output comes from the backend, once, as more events for the row.
 //
 // Pictures. That runner puts the pictures pasted into its messages up for
@@ -35,7 +35,7 @@
 // order, and every one has a seq of its own. The app takes these threads' events with gaps
 // and late ones (ThreadFeed's sparse mode), and pages by these seqs.
 //
-// Reads (docs/full-convex.md, "Read rules"): a thread is watched only while
+// Reads (docs/convex-backend.md, "Read rules"): a thread is watched only while
 // an app has it subscribed, through a 15-row tail and its one threads row;
 // older rows are read once by page and kept here, and a tail that skips past
 // what's held reads the gap once rather than leave a hole.
@@ -206,6 +206,8 @@ export type RelayRow = {
   pictures?: number;
   // The asks a user's message answered (API 89).
   answers?: AskAnswer[];
+  // Why the runner sent its own message (API 98): its note's header.
+  wakeReason?: string;
   at: string;
 };
 export type RowButton = { id: string; title: string; kind: 'start' | 'send'; target?: string; pressedThreadId?: string; failed?: string };
@@ -440,7 +442,7 @@ export function relayEvents(threadId: string, rows: RelayRow[], row: RelayThread
     if (r.role === 'user') {
       // Without the pictures read (an older backend), as that runner's words alone.
       const { text, images } = pictures ? messageWithPictures(threadId, r, pictures.get(r.seq)) : { text: r.text, images: [] };
-      out.push(env(base + 1, r, { type: 'user.message', text, images, ...(r.answers?.length ? { answers: r.answers.map((a) => ({ action: a.action, answer: a.answer })) } : {}), ...(r.origin === 'phone' || r.origin === 'runner' || r.origin === 'schedule' ? { origin: r.origin } : {}) }));
+      out.push(env(base + 1, r, { type: 'user.message', text, images, ...(r.answers?.length ? { answers: r.answers.map((a) => ({ action: a.action, answer: a.answer })) } : {}), ...(r.origin === 'phone' || r.origin === 'runner' || r.origin === 'schedule' ? { origin: r.origin } : {}), ...(r.origin === 'runner' && r.wakeReason ? { wakeReason: r.wakeReason } : {}) }));
     } else if (r.role === 'assistant' && r.plan) {
       // A Plan first plan: its card, as that runner's own Mac draws it. As a
       // reply it folded into the turn's work and nothing showed (12 Nov).
@@ -722,7 +724,7 @@ export class Relay {
       lastSeenSeq: 0,
       runnerId: t.runnerId,
     };
-    for (const k of ['model', 'createdAt', 'lastActivityAt', 'snoozedUntil', 'archivedAt', 'starredAt', 'startedBy', 'asked', 'keywords'] as const) {
+    for (const k of ['model', 'createdAt', 'lastActivityAt', 'snoozedUntil', 'archivedAt', 'starredAt', 'startedBy', 'asked', 'keywords', 'waitState'] as const) {
       if (t[k] !== undefined) thread[k] = t[k];
     }
     // Its real access, or "unknown" from a runner that doesn't say: never
@@ -737,7 +739,7 @@ export class Relay {
   }
 
   /**
-   * The done card's loose ends (docs/protocol.md, "Loose ends") as this
+   * The done card's loose ends (docs/protocol/threads.md, "Loose ends") as this
    * runner's summary has them, `{ seq, ends }`, from the thread's backend
    * row (API 73) and the seq of the turn.completed the relay gave the app
    * for that card. Only for a thread being watched: the sidebar's rows don't
@@ -776,6 +778,9 @@ export class Relay {
       else t[k] = c.value === PUT_AWAY ? UNTIL_RESTART : c.value;
     }
     if (!kept.size) this.changed.delete(threadId);
+    // The row's state is from before the change: without it the app's own
+    // rule draws the change (Codex's review, 23 Nov).
+    else delete t.waitState;
     return t as T;
   }
 
@@ -1602,7 +1607,7 @@ export class Relay {
       case 'threads.forkInfo':
       case 'threads.fork': {
         // Upstream APIs 80 and 81 use those versions for pairing instead.
-        this.needsBackend(w, 96, 'Forking a conversation');
+        this.needsBackend(w, 100, 'Forking a conversation');
         const params = { ...(method === 'threads.fork' ? { workspace: p.workspace, requestId: p.requestId } : {}), ...(p.throughTurnId === undefined ? {} : { throughTurnId: p.throughTurnId }) };
         const relayMethod = p.throughTurnId === undefined ? method : `${method}At`;
         const done = await this.command(w.runnerId, threadId, 'call', { method: relayMethod, params }, { done: true, ms: 120_000 });

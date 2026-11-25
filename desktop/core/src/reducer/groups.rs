@@ -1,31 +1,22 @@
 // Rows the model derives rather than reads from events: a port of
 // Transcript/WorkGroups.swift and the words from Threads/BackgroundWork.swift.
 use super::diff::DiffBuilder;
-use super::event::{BackgroundKind, BackgroundTask, EditDiff, ToolKind};
-use super::row::{Row, RowContent, ToolItem};
+use super::event::{BackgroundKind, BackgroundTask, ToolKind};
+use super::row::{ChangedFile, ChangedFiles, Row, RowContent, ToolItem, WorkGroup};
 use super::text;
 use super::tool_presentation::{PathDisplay, ToolPresentation};
 use std::collections::HashSet;
 
-/// A run of work inside one turn folded into one line (`WorkGroup`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct WorkGroup {
-    /// Row ids of the folded items, oldest first.
-    pub member_ids: Vec<String>,
-    /// "Read 3 files, searched twice, ran 4 commands".
-    pub summary: String,
-    /// Tool calls in the group that failed.
-    pub failed_count: usize,
-    pub is_expanded: bool,
-    /// The last group of a turn that's still running.
-    pub is_live: bool,
-    /// While live, what's happening now ("Running npm test"), if anything is.
-    pub current_action: Option<String>,
-}
-
 impl WorkGroup {
     pub fn new(member_ids: Vec<String>, summary: &str) -> WorkGroup {
-        WorkGroup { member_ids, summary: summary.to_owned(), failed_count: 0, is_expanded: false, is_live: false, current_action: None }
+        WorkGroup {
+            member_ids,
+            summary: summary.to_owned(),
+            failed_count: 0,
+            is_expanded: false,
+            is_live: false,
+            current_action: None,
+        }
     }
 
     pub(crate) fn from_members(members: &[&Row], is_expanded: bool, is_live: bool) -> WorkGroup {
@@ -36,36 +27,16 @@ impl WorkGroup {
             failed_count,
             is_expanded,
             is_live,
-            current_action: if is_live { WorkSummary::current_action(members) } else { None },
+            current_action: if is_live {
+                WorkSummary::current_action(members)
+            } else {
+                None
+            },
         }
     }
 }
 
 /// The "Working for 12s" line at the end of a running turn (`WorkingStatus`).
-/// The view counts the seconds itself, so the row doesn't change as they
-/// pass.
-#[derive(Clone, Debug, PartialEq)]
-pub struct WorkingStatus {
-    pub turn_id: String,
-    /// When the turn started (seconds since 1970), if the loaded events say.
-    pub started_at: Option<f64>,
-}
-
-/// The line at the end of a thread whose turn is over but whose CLI still
-/// has sub-agents or jobs running in the background (`BackgroundStatus`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct BackgroundStatus {
-    pub tasks: Vec<BackgroundTask>,
-}
-
-/// The "Edited 3 files" card at the end of a turn that changed files
-/// (`ChangedFiles`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct ChangedFiles {
-    pub turn_id: String,
-    pub files: Vec<ChangedFile>,
-}
-
 impl ChangedFiles {
     pub fn title(&self) -> String {
         if self.files.len() == 1 {
@@ -87,21 +58,6 @@ impl ChangedFiles {
     pub fn expansion_key(turn_id: &str, path: &str) -> String {
         format!("cf:{turn_id}|{path}")
     }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ChangedFile {
-    pub path: String,
-    pub added: i64,
-    pub removed: i64,
-    /// Every successful edit to the file in the turn, in order.
-    pub diffs: Vec<EditDiff>,
-    /// Its diff is open under it in the card.
-    pub is_expanded: bool,
-    /// Its open diff shows every line, not just the first few.
-    pub shows_all: bool,
-    /// The thread's working folder.
-    pub root: Option<String>,
 }
 
 impl ChangedFile {
@@ -181,7 +137,12 @@ impl WorkSummary {
         let mut first_note: Option<String> = None;
         let mut allowed = 0usize;
 
-        fn count(order: &mut Vec<Category>, counts: &mut Vec<(Category, i64)>, category: Category, amount: i64) {
+        fn count(
+            order: &mut Vec<Category>,
+            counts: &mut Vec<(Category, i64)>,
+            category: Category,
+            amount: i64,
+        ) {
             if !counts.iter().any(|(c, _)| *c == category) {
                 order.push(category);
                 counts.push((category, 0));
@@ -212,7 +173,11 @@ impl WorkSummary {
                             // The same file read twice is still one file.
                             let input = tool.call.as_ref().map(|c| &c.input);
                             let path = input
-                                .and_then(|i| i.get("file_path").and_then(|v| v.as_str()).or_else(|| i.get("path").and_then(|v| v.as_str())))
+                                .and_then(|i| {
+                                    i.get("file_path")
+                                        .and_then(|v| v.as_str())
+                                        .or_else(|| i.get("path").and_then(|v| v.as_str()))
+                                })
                                 .map(str::to_owned)
                                 .unwrap_or_else(|| tool.item_id.clone());
                             let fresh = read_paths.insert(path);
@@ -224,16 +189,33 @@ impl WorkSummary {
                             // every streamed delta. A Codex patch counts each
                             // file it touches.
                             let paths = tool.edited_paths();
-                            let paths = if paths.is_empty() { vec![tool.item_id.clone()] } else { paths };
-                            let added: i64 = paths.into_iter().map(|p| i64::from(edit_paths.insert(p))).sum();
+                            let paths = if paths.is_empty() {
+                                vec![tool.item_id.clone()]
+                            } else {
+                                paths
+                            };
+                            let added: i64 = paths
+                                .into_iter()
+                                .map(|p| i64::from(edit_paths.insert(p)))
+                                .sum();
                             count(&mut order, &mut counts, Category::Edit, added);
                         }
                         Category::ImageMade => {
                             // One that failed made nothing; the red icon says so.
-                            let made = if tool.failed() { 0 } else { tool.result.as_ref().map(|r| r.images.len() as i64).unwrap_or(1).max(1) };
+                            let made = if tool.failed() {
+                                0
+                            } else {
+                                tool.result
+                                    .as_ref()
+                                    .map(|r| r.images.len() as i64)
+                                    .unwrap_or(1)
+                                    .max(1)
+                            };
                             count(&mut order, &mut counts, Category::ImageMade, made);
                         }
-                        Category::ImageViewed => count(&mut order, &mut counts, Category::ImageViewed, 1),
+                        Category::ImageViewed => {
+                            count(&mut order, &mut counts, Category::ImageViewed, 1)
+                        }
                         other => count(&mut order, &mut counts, other, 1),
                     }
                 }
@@ -243,7 +225,16 @@ impl WorkSummary {
 
         let parts: Vec<String> = order
             .iter()
-            .filter_map(|c| phrase(*c, counts.iter().find(|(k, _)| k == c).map(|(_, n)| *n).unwrap_or(0)))
+            .filter_map(|c| {
+                phrase(
+                    *c,
+                    counts
+                        .iter()
+                        .find(|(k, _)| k == c)
+                        .map(|(_, n)| *n)
+                        .unwrap_or(0),
+                )
+            })
             .collect();
         let mut summary = parts.join(", ");
         if summary.is_empty() {
@@ -270,8 +261,12 @@ impl WorkSummary {
     pub fn current_action(items: &[&Row]) -> Option<String> {
         for item in items.iter().rev() {
             match &item.content {
-                RowContent::Tool(tool) if !tool.is_finished() => return Some(ToolPresentation::active_title(tool)),
-                RowContent::Reasoning(text) if text.is_streaming => return Some("Thinking".to_owned()),
+                RowContent::Tool(tool) if !tool.is_finished() => {
+                    return Some(ToolPresentation::active_title(tool))
+                }
+                RowContent::Reasoning(text) if text.is_streaming => {
+                    return Some("Thinking".to_owned())
+                }
                 _ => continue,
             }
         }
@@ -279,7 +274,10 @@ impl WorkSummary {
     }
 
     pub fn first_line(text: &str) -> String {
-        let line = text.split(self::text::is_newline).find(|p| !p.is_empty()).unwrap_or(text);
+        let line = text
+            .split(self::text::is_newline)
+            .find(|p| !p.is_empty())
+            .unwrap_or(text);
         if self::text::count(line) > 120 {
             format!("{}…", self::text::prefix(line, 119))
         } else {
@@ -292,11 +290,17 @@ impl WorkSummary {
     /// ended, a long first line could stop just after a full stop and read
     /// "confirmed.…".
     pub fn thought(text: &str) -> String {
-        let mut line = text.split(self::text::is_newline).find(|p| !p.is_empty()).unwrap_or("").to_owned();
+        let mut line = text
+            .split(self::text::is_newline)
+            .find(|p| !p.is_empty())
+            .unwrap_or("")
+            .to_owned();
         if self::text::count(&line) > 200 {
             line = self::text::prefix(&line, 200);
         }
-        let Some(stop) = line.find(". ") else { return line };
+        let Some(stop) = line.find(". ") else {
+            return line;
+        };
         let sentence = format!("{}.", &line[..stop]);
         if (20..=140).contains(&self::text::count(&sentence)) {
             sentence
@@ -330,7 +334,12 @@ fn category_of(tool: &ToolItem) -> Category {
         ToolKind::Todo => Category::Plan,
         ToolKind::Image => Category::ImageMade,
         ToolKind::Mcp | ToolKind::Other => {
-            if tool.call.as_ref().map(DiffBuilder::is_edit_tool).unwrap_or(false) {
+            if tool
+                .call
+                .as_ref()
+                .map(DiffBuilder::is_edit_tool)
+                .unwrap_or(false)
+            {
                 Category::Edit
             } else {
                 Category::Tool
@@ -385,23 +394,47 @@ impl BackgroundWork {
         let running: Vec<&BackgroundTask> = tasks.iter().filter(|t| !t.finished).collect();
         let finished = tasks.len() - running.len();
         if running.is_empty() {
-            let kinds: HashSet<BackgroundKind> = tasks.iter().filter(|t| t.finished).map(|t| t.kind).collect();
-            let kind = if kinds.len() == 1 { *kinds.iter().next().unwrap_or(&BackgroundKind::Shell) } else { BackgroundKind::Shell };
+            let kinds: HashSet<BackgroundKind> = tasks
+                .iter()
+                .filter(|t| t.finished)
+                .map(|t| t.kind)
+                .collect();
+            let kind = if kinds.len() == 1 {
+                *kinds.iter().next().unwrap_or(&BackgroundKind::Shell)
+            } else {
+                BackgroundKind::Shell
+            };
             let what = count_words(finished, kind);
-            return format!("{what} just finished, about to read {}", if finished == 1 { "its result" } else { "their results" });
-        }
-        let parts: Vec<String> = [BackgroundKind::Agent, BackgroundKind::Shell, BackgroundKind::Monitor, BackgroundKind::Other]
-            .iter()
-            .filter_map(|kind| {
-                let n = running.iter().filter(|t| t.kind == *kind).count();
-                if n == 0 {
-                    None
+            return format!(
+                "{what} just finished, about to read {}",
+                if finished == 1 {
+                    "its result"
                 } else {
-                    Some(count_words(n, *kind))
+                    "their results"
                 }
-            })
-            .collect();
-        let verb = if parts.len() == 1 && running[0].kind == BackgroundKind::Agent { "working" } else { "running" };
+            );
+        }
+        let parts: Vec<String> = [
+            BackgroundKind::Agent,
+            BackgroundKind::Shell,
+            BackgroundKind::Monitor,
+            BackgroundKind::Other,
+        ]
+        .iter()
+        .filter_map(|kind| {
+            let n = running.iter().filter(|t| t.kind == *kind).count();
+            if n == 0 {
+                None
+            } else {
+                Some(count_words(n, *kind))
+            }
+        })
+        .collect();
+        let verb = if parts.len() == 1 && running[0].kind == BackgroundKind::Agent {
+            "working"
+        } else {
+            "running"
+        };
         let mut line = format!("{} {verb} in the background", join(&parts));
         if finished > 0 {
             line.push_str(&format!(", {finished} just finished"));
@@ -418,9 +451,21 @@ impl BackgroundWork {
                 if task.description.is_empty() {
                     return None;
                 }
-                let one_line = task.description.split(text::is_newline).find(|p| !p.is_empty()).unwrap_or(&task.description);
-                let cut = if text::count(one_line) > 60 { format!("{}…", text::prefix(one_line, 59)) } else { one_line.to_owned() };
-                Some(if task.finished { format!("{cut} (finished)") } else { cut })
+                let one_line = task
+                    .description
+                    .split(text::is_newline)
+                    .find(|p| !p.is_empty())
+                    .unwrap_or(&task.description);
+                let cut = if text::count(one_line) > 60 {
+                    format!("{}…", text::prefix(one_line, 59))
+                } else {
+                    one_line.to_owned()
+                };
+                Some(if task.finished {
+                    format!("{cut} (finished)")
+                } else {
+                    cut
+                })
             })
             .collect();
         if names.is_empty() {
@@ -450,6 +495,10 @@ fn join(parts: &[String]) -> String {
         0 => String::new(),
         1 => parts[0].clone(),
         2 => format!("{} and {}", parts[0], parts[1]),
-        _ => format!("{} and {}", parts[..parts.len() - 1].join(", "), parts[parts.len() - 1]),
+        _ => format!(
+            "{} and {}",
+            parts[..parts.len() - 1].join(", "),
+            parts[parts.len() - 1]
+        ),
     }
 }

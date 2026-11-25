@@ -134,9 +134,11 @@ fun InboxScreen(
     val identity by model.identity.collectAsStateWithLifecycle()
     val snoozed by model.putAway(PhoneSection.HIBERNATING).collectAsStateWithLifecycle()
     val den by model.putAway(PhoneSection.ARCHIVED).collectAsStateWithLifecycle()
-    val archiving by shell.archiving.collectAsStateWithLifecycle()
+    // Every command on its way from here (archives, stars, wakes...): rows
+    // show them at once, and go back if one's refused.
+    val pending by model.commands.entries.collectAsStateWithLifecycle()
     val tucks by shell.tucks.collectAsStateWithLifecycle()
-    val back by shell.bringingBack.collectAsStateWithLifecycle()
+    val back = remember(pending) { model.bringingBack(pending) }
     val starting by shell.starting.collectAsStateWithLifecycle()
     val cards by shell.pocket.collectAsStateWithLifecycle()
     val seen by shell.pocketSeenUpTo.collectAsStateWithLifecycle()
@@ -150,7 +152,7 @@ fun InboxScreen(
     LaunchedEffect(counts) { shell.countsArrived(counts?.hibernating) }
 
     val wakeMap = remember(wakes) { InboxSections.wakes(wakes) }
-    val sections = remember(inbox, wakeMap, archiving, tucks, now) { shell.sections(inbox ?: emptyList(), now, wakeMap) }
+    val sections = remember(inbox, wakeMap, pending, tucks, now) { shell.sections(inbox ?: emptyList(), now, wakeMap, pending) }
     // A list update that only changes a title or a working line leaves the rows
     // still, as they can come in bursts; a thread changing heading glides.
     // Held outside Compose state, so noting it doesn't redraw the list and
@@ -316,8 +318,11 @@ private fun SearchResults(
         delay(300)
         older = shell.searchOlderArchived(text)
     }
-    val search = remember(text, sections, asleep, archived, older, wakes, back) {
-        ThreadSearch.of(text, sections, asleep.filter { it.threadId !in back }, archived.filter { it.threadId !in back }, older, wakes)
+    // Put-away ones less those brought back from here, with the changes tapped here on top.
+    val pending by model.commands.entries.collectAsStateWithLifecycle()
+    fun searchable(list: List<PhoneThread>) = list.filter { it.threadId !in back }.map { model.shown(it, pending) }
+    val search = remember(text, sections, asleep, archived, older, wakes, back, pending) {
+        ThreadSearch.of(text, sections, searchable(asleep), searchable(archived), searchable(older), wakes)
     }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = padding) {
         if (search.isEmpty) {
@@ -532,7 +537,7 @@ private fun LoadingRow() {
 private fun InboxRow(t: PhoneThread, under: PhoneSection, rows: RowContext, modifier: Modifier = Modifier) {
     val model = LocalModel.current
     // Only under Starred can a row be asleep: elsewhere it's in Hibernating.
-    val asleep = under == PhoneSection.STARRED && InboxSections.isSnoozed(t, rows.now)
+    val asleep = under == PhoneSection.STARRED && InboxSections.isAsleep(t, rows.now)
     var menu by remember { mutableStateOf(false) }
     val state = rememberSwipeToDismissBoxState()
     LaunchedEffect(state.currentValue) {
@@ -540,7 +545,7 @@ private fun InboxRow(t: PhoneThread, under: PhoneSection, rows: RowContext, modi
             SwipeToDismissBoxValue.EndToStart -> {
                 model.change(t.threadId, ThreadChange.Archive)
                 // Gone from the list at once; back in place if it couldn't go.
-                if (t.threadId !in model.shell.archiving.value) state.reset()
+                if (!model.shell.archiving(t.threadId)) state.reset()
             }
             SwipeToDismissBoxValue.StartToEnd -> {
                 if (asleep) model.change(t.threadId, ThreadChange.Wake) else rows.hibernate(t)
@@ -590,7 +595,7 @@ private fun PutAwayRow(t: PhoneThread, under: PhoneSection, rows: RowContext, mo
     LaunchedEffect(state.currentValue) {
         if (state.currentValue == SwipeToDismissBoxValue.EndToStart) {
             model.shell.bringBack(t.threadId, change)
-            if (t.threadId !in model.shell.bringingBack.value) state.reset()
+            if (t.threadId !in model.bringingBack(model.commands.entries.value)) state.reset()
         }
     }
     SwipeToDismissBox(
@@ -684,7 +689,7 @@ fun ThreadRow(
 ) {
     val signals = LocalSignals.current
     val kind = RowStatus.kind(t)
-    val renamed by LocalModel.current.renamed.collectAsStateWithLifecycle()
+    val pending by LocalModel.current.commands.entries.collectAsStateWithLifecycle()
     Row(
         modifier.fillMaxWidth().animateContentSize().padding(start = 6.dp, end = 16.dp, top = 10.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -694,7 +699,7 @@ fun ThreadRow(
         // nothing needed. Not for unread alone: a running thread is always
         // unread, and its working mark already says so.
         val done = kind == RowStatus.Kind.TIME && t.unread && !t.needsYou
-        val needs = kind == RowStatus.Kind.NEEDS_YOU || (t.needsYou && kind != RowStatus.Kind.WORKING)
+        val needs = RowStatus.wantsMike(t)
         Box(Modifier.width(14.dp), contentAlignment = Alignment.Center) {
             when {
                 done -> Icon(Line.Check, "Done, unread", Modifier.size(10.dp), tint = signals.accent)
@@ -706,9 +711,9 @@ fun ThreadRow(
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    LocalModel.current.title(t, renamed),
+                    LocalModel.current.title(t, pending),
                     style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = if (t.needsYou || kind == RowStatus.Kind.NEEDS_YOU || done) FontWeight.SemiBold else FontWeight.Normal,
+                    fontWeight = if (t.needsYou || needs || done) FontWeight.SemiBold else FontWeight.Normal,
                     maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
                 )
                 if (t.starredAt != null) {
@@ -724,7 +729,7 @@ fun ThreadRow(
                 val model = LocalModel.current
                 val runners by model.runners.collectAsStateWithLifecycle()
                 val runner = if (runners.size > 1) runners.firstOrNull { it.runnerId == t.runnerId }?.name else null
-                val doing = t.working?.takeIf { t.isBusy || (t.pendingApproval == null && !t.waitingOnMike) }
+                val doing = RowStatus.doing(t)
                 val line = listOfNotNull(InboxSections.wakeLine(t, now), t.placeText, runner, doing).joinToString(" · ")
                 Text(line, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1,
                     overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))

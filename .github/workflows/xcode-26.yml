@@ -12,14 +12,16 @@
 #
 # Free, as runner.yml is: a public repo on GitHub's standard runners. It only
 # runs when something it builds changed, so a runner-only change spends no
-# macOS minutes. Everything both builds read is under app/, dock/ and ios/
-# (the iPhone project takes ../app/SentryBinary, and ThreadbearKit links
-# files from app/Sources), so a new path outside those belongs here too.
+# macOS minutes. Everything both builds read is under app/, dock/, ios/ and
+# shared/ (the Mac app links to Sentry's package in ios/SentryBinary, three
+# of ThreadbearKit's Swift files, and its art, Pele and icon in shared/), so a
+# new path outside those belongs here too.
 #
-# tb land holds a landing that changes what this checks while its last run
-# on main failed (runner/src/land-gate.ts, docs/thread-worktrees.md "Red on
-# GitHub"), and main's runs aren't cancelled by newer pushes, so each one
-# finishes and says something (only a pull request's are). From 16 to 19
+# When its last run on main failed (or a job ran into its timeout), tb
+# red-watch starts a thread to fix it and tb land says so (runner/src/
+# red-watch.ts, docs/thread-worktrees.md "Red on GitHub"), and main's runs
+# aren't cancelled by newer pushes, so each one finishes and says something
+# (only a pull request's are). From 16 to 19
 # Nov this workflow was red on Windows while landings went on top, and
 # with every workflow having to pass on one commit for the daily release,
 # none went out (runner/src/upstream.ts).
@@ -33,6 +35,7 @@ on:
       - 'app/**'
       - 'dock/**'
       - 'ios/**'
+      - 'shared/**'
       - '.github/workflows/xcode-26.yml'
   pull_request:
     # The same list as push's, kept in step by hand.
@@ -40,6 +43,7 @@ on:
       - 'app/**'
       - 'dock/**'
       - 'ios/**'
+      - 'shared/**'
       - '.github/workflows/xcode-26.yml'
   workflow_dispatch:
 

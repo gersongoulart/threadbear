@@ -30,14 +30,17 @@
 # could build it (none answered, or the one building it went away or ran short
 # of disk), 5 if no host is trusted to build it and this Mac doesn't build,
 # 1 on a failed build (an earlier staged bundle is left as it was).
-# A busy build host (or one with queued measurements) also exits 4: update
-# builds try the leases without queueing, so screen tests can go first. But
-# not for ever: with agents keeping Tinker Desk busy all day there was never
-# a free moment, and 63 tries over a day built nothing while fixes waited on
-# main (18 Nov). Once tries have found every host busy for QUEUE_AFTER (45
-# minutes; THREADBEAR_UPDATE_QUEUE_AFTER in seconds), the next run queues
-# for the first busy host's lease like any other run and builds when its
-# turn comes.
+# The build goes ahead of agents' builds, checks and measurements waiting on
+# the host, as a landing's check does (THREADBEAR_REMOTE_FIRST, remote.sh;
+# scripts/perf-lock.pl): Mike asked on 24 Nov, when 1,162 of 1,350 tries had
+# been put off behind them and his app ran half an hour to two hours behind
+# main. Each host is tried first, without waiting; when every one is busy,
+# it waits on the first busy host for what's running there to end, and
+# builds next. It used to try again later instead, so screen tests could go
+# first, and from 18 Nov waited only once tries had found every host busy for
+# 45 minutes (63 tries that day built nothing). THREADBEAR_UPDATE_QUEUE_AFTER
+# (seconds) still sets such a wait; without it, none. Waiting, the run exits 4
+# only if it gives up.
 set -euo pipefail
 
 CHECKOUT=""
@@ -53,9 +56,10 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$CHECKOUT" && ( -d "$CHECKOUT/.git" || -f "$CHECKOUT/.git" ) ]] || { echo "No checkout to build from (give the repo's path)." >&2; exit 2; }
 
-# Started from the app, PATH is the bare system one: git, ssh, rsync and
-# codesign are in /usr/bin, and cargo, for a build here, in ~/.cargo/bin.
-export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.cargo/bin:$PATH"
+# Started from the app, PATH is the bare system one: git, ssh, rsync, curl
+# and codesign are in /usr/bin. A build here needs no Rust of the Mac's
+# own: pinned-cargo.sh fetches the pinned one.
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 CACHE="$HOME/Library/Caches/Threadbear/update-desktop"
 SRC="$CACHE/src"
 LOCK="$CACHE/lock"
@@ -74,7 +78,16 @@ if ! mkdir "$LOCK" 2>/dev/null; then
   mkdir "$LOCK" 2>/dev/null || { echo "Another update build has just started." >&2; exit 3; }
 fi
 echo $$ >"$LOCK/pid"
-trap 'rm -rf "$LOCK"' EXIT
+# What the app's Updates panel says of this run (app_update.rs, BuildPhase):
+# one line, `busy <host> <since>` (every host busy, tried again later),
+# `queued <host> <since> <ahead>` or `building <host> <since>`, since in
+# Unix seconds. Gone when the run ends, except for busy, which the app shows
+# while it waits for its next try.
+PHASE="$CACHE/phase"
+rm -f "$PHASE"
+KEEP_PHASE=""
+set_phase() { printf '%s\n' "$*" >"$PHASE.tmp" && mv -f "$PHASE.tmp" "$PHASE"; }
+trap '[[ -n "$KEEP_PHASE" ]] || rm -f "$PHASE"; rm -rf "$LOCK"' EXIT
 
 MAIN="$(git -C "$CHECKOUT" rev-parse --verify -q refs/heads/main)" || { echo "$CHECKOUT has no main branch." >&2; exit 2; }
 echo "Staging main ($(git -C "$CHECKOUT" rev-parse --short "$MAIN")) from $CHECKOUT into $NEXT_DIR"
@@ -107,8 +120,8 @@ CHECK_HOSTS="$(hosts_in checkHosts)"
 
 # When tries first found every trusted host busy, kept until one builds.
 DEFERRED="$CACHE/deferred-since"
-QUEUE_AFTER="${THREADBEAR_UPDATE_QUEUE_AFTER:-2700}"
-[[ "$QUEUE_AFTER" =~ ^[0-9]+$ ]] || QUEUE_AFTER=2700
+QUEUE_AFTER="${THREADBEAR_UPDATE_QUEUE_AFTER:-0}"
+[[ "$QUEUE_AFTER" =~ ^[0-9]+$ ]] || QUEUE_AFTER=0
 
 BINS="$CACHE/bins"
 rm -rf "$BINS"
@@ -151,6 +164,25 @@ if [[ -n "$HOSTS" ]]; then
   # still builds (it ignores the request) instead of running an unknown flag.
   BUILT_ON=""
   BUSY_HOST=""
+  # watch_phase <host> <try>: keeps the phase file up to date from what the
+  # run says. A queued run (try 0) is queued until the host starts it, with
+  # how many runs the host's lock says are ahead; a try is building at once,
+  # as it either has the host or gives up.
+  watch_phase() {
+    local started="" ahead line
+    while :; do
+      if [[ -z "$started" ]] && { [[ "$2" == 1 ]] || grep -q '^BUILD_STARTED' "$out" 2>/dev/null; }; then
+        started=1
+        set_phase building "$1" "$(date +%s)"
+      elif [[ -z "$started" ]]; then
+        line="$(grep -E '^(Still waiting|Waiting for)' "$out" 2>/dev/null | tail -1 || true)"
+        ahead="$(grep -oE '[0-9]+ other runs? waiting' <<<"$line" | grep -oE '^[0-9]+' || true)"
+        [[ -f "$PHASE" ]] && read -r _ _ since _ <"$PHASE" 2>/dev/null || since="$(date +%s)"
+        set_phase queued "$1" "${since:-$(date +%s)}" "${ahead:-0}"
+      fi
+      sleep 5
+    done
+  }
   # build_on <host> <try>: 1 tries the leases and gives up (75) if busy, 0
   # queues for them. Sets rc.
   build_on() {
@@ -162,14 +194,22 @@ if [[ -n "$HOSTS" ]]; then
     # here would go while an orphan still queued for a build nobody stages.
     # A build only, so it can go beside another on a host that allows that
     # (remote.sh --build), asked for by environment as TRY is.
-    THREADBEAR_REMOTE_BUILD=1 THREADBEAR_REMOTE_TRY="$2" "$SRC/desktop/scripts/remote.sh" "$1" -- bash -c "set -o pipefail; cd desktop && nice cargo build --release -p threadbear-gpui --features $FEATURES 2>&1 | tail -3 && echo \"BUILT_IN=\$CARGO_TARGET_DIR\"" </dev/null > "$out" 2>&1 &
+    # BUILD_STARTED is the host's first word once the run has its turn.
+    : >"$out"
+    THREADBEAR_REMOTE_BUILD=1 THREADBEAR_REMOTE_FIRST=1 THREADBEAR_REMOTE_TRY="$2" "$SRC/desktop/scripts/remote.sh" "$1" -- bash -c "set -o pipefail; echo BUILD_STARTED; cd desktop && nice ./scripts/pinned-cargo.sh build --release -p threadbear-gpui --features $FEATURES 2>&1 | tail -3 && echo \"BUILT_IN=\$CARGO_TARGET_DIR\"" </dev/null > "$out" 2>&1 &
     REMOTE_PID=$!
+    watch_phase "$1" "$2" &
+    WATCH_PID=$!
     wait "$REMOTE_PID" || rc=$?
     REMOTE_PID=""
+    kill "$WATCH_PID" 2>/dev/null || true
+    wait "$WATCH_PID" 2>/dev/null || true
+    WATCH_PID=""
     cat "$out"
   }
   REMOTE_PID=""
-  trap '[[ -z "$REMOTE_PID" ]] || { kill -TERM "$REMOTE_PID" 2>/dev/null; wait "$REMOTE_PID" 2>/dev/null; }; exit 143' TERM
+  WATCH_PID=""
+  trap '[[ -z "$WATCH_PID" ]] || kill "$WATCH_PID" 2>/dev/null; [[ -z "$REMOTE_PID" ]] || { kill -TERM "$REMOTE_PID" 2>/dev/null; wait "$REMOTE_PID" 2>/dev/null; }; exit 143' TERM
   while IFS= read -r HOST; do
     # A Mac that answers within a few seconds, with no prompt to wait on.
     [[ "$(ssh -o BatchMode=yes -o ConnectTimeout=8 "$HOST" uname -s </dev/null 2>/dev/null || true)" == Darwin ]] || continue
@@ -202,6 +242,7 @@ if [[ -n "$HOSTS" ]]; then
     fi
   fi
   if [[ -z "$BUILT_ON" ]]; then
+    [[ -z "$BUSY_HOST" ]] || { set_phase busy "$BUSY_HOST" "$since"; KEEP_PHASE=1; }
     echo "None of the update build hosts ($(tr '\n' ' ' <<<"$HOSTS")) is a Mac that answered and was free, so nothing was built; the app tries again later." >&2
     exit 4
   fi
@@ -219,25 +260,12 @@ elif [[ -n "$CHECK_HOSTS" ]]; then
 else
   echo "No update build hosts or check hosts in $CONFIG: building here."
   BUILT_ON=""
-  # The newest stable Rust, which is what desktop.yml builds and tests with:
-  # code that needs a recent Rust passes there and then fails partway
-  # through a 20-minute build on an older one (the vendored crates alone
-  # need 1.85). Through rustup when there is one, whatever its default
-  # toolchain is; an update that fails (offline) builds with the stable
-  # that's there. Without rustup (Homebrew's rust), the cargo on PATH.
-  cargo=(cargo)
-  if command -v rustup >/dev/null; then
-    if rustup toolchain install stable --profile minimal --no-self-update >/dev/null 2>&1 || rustup run stable cargo --version >/dev/null 2>&1; then
-      cargo=(rustup run stable cargo)
-    else
-      echo "Couldn't get Rust's stable toolchain (rustup toolchain install stable), so building with rustup's default." >&2
-    fi
-  fi
-  (cd "$SRC/desktop" && CARGO_TARGET_DIR="$CACHE/target" CARGO_HTTP_MULTIPLEXING=false CARGO_NET_RETRY=10 "${cargo[@]}" build --release -p threadbear-gpui --features "$FEATURES") || {
-    rc=$?
-    [[ "${cargo[0]}" == rustup ]] || echo "The build failed with $(cargo --version 2>/dev/null || echo "this Mac's cargo"). Threadbear is built and tested on the newest stable Rust: rustup (https://rustup.rs) keeps one, and this build uses it when it's there." >&2
-    exit "$rc"
-  }
+  # With exactly the Rust main pins (rust-toolchain.toml's version, each
+  # part checked against desktop/scripts/rust-toolchain.pins before it's
+  # unpacked), through main's pinned-cargo.sh: never rustup's stable, a
+  # toolchain rustup fetched, or whatever cargo is on PATH. The compiler
+  # writes the app this Mac runs next (Daybreak 173, 23 Nov 2026).
+  (cd "$SRC/desktop" && CARGO_TARGET_DIR="$CACHE/target" CARGO_HTTP_MULTIPLEXING=false CARGO_NET_RETRY=10 "$SRC/desktop/scripts/pinned-cargo.sh" build --release -p threadbear-gpui --features "$FEATURES")
   cp "$CACHE/target/release/threadbear-gpui" "$CACHE/target/release/threadbear-web-helper" "$BINS/"
 fi
 

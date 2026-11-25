@@ -1,4 +1,4 @@
-// Handovers: draining this runner after a new release takes over, and adopting threads from the old one (docs/protocol.md, "Handovers").
+// Handovers: draining this runner after a new release takes over, and adopting threads from the old one (docs/protocol/updates.md, "Handovers").
 // Part of the Runner (runner.ts), split out on 4 Nov 2026 as a plain move so a
 // fork's change to one area doesn't clash with another's. Each method's `this`
 // is the Runner; runner.ts puts them on its prototype.
@@ -10,7 +10,9 @@ import type { PersistedEvent, ThreadSummary } from '../protocol.ts';
 import { ErrorCode, RpcError } from '../protocol.ts';
 import type { ThreadRecord } from '../store.ts';
 import type { Drain, ThreadState } from '../runner.ts';
-import { DRAIN_AGENT_MS, DRAIN_BACKGROUND_MS, DRAIN_CHECK_MS, DRAIN_MAX_OLD_MS, DRAIN_SETTLE_MS, newRuntime } from '../runner.ts';
+import { DRAIN_AGENT_MS, DRAIN_BACKGROUND_MS, DRAIN_CHECK_MS, DRAIN_MAX_OLD_MS, DRAIN_SETTLE_MS } from './timings.ts';
+import { newRuntime } from './runtime.ts';
+import { runningSession } from '../cli-session.ts';
 
 // Runner.openCards: events read from a log at once, kept small as each
 // chunk is read and parsed in one go on a runner still running turns, and
@@ -48,7 +50,7 @@ export const handoversPart = {
       // (readyToHandOver): the new runner would wake it. And one going back
       // to an earlier message: letting it go mid-edit saved the record from
       // before the cut, after the files had been put back (13 Nov 2026).
-      keep: new Set([...keep, ...[...this.threads.values()].filter((st) => st.rt.cleaning || this.worktreeCleanup(st) || st.rt.preparing || st.rt.hooksRunning || st.rt.editing || st.rt.forking || st.rec.wakeWhen?.pending).map((st) => st.rec.id)].filter((id) => this.threads.has(id))),
+      keep: new Set([...keep, ...[...this.threads.values()].filter((st) => st.rt.cleaning !== undefined || Boolean(this.worktreeCleanup(st)) || st.rt.preparing !== undefined || st.rt.hooksRunning || st.rt.editing || st.rt.forking || st.rec.wakeWhen?.pending).map((st) => st.rec.id)].filter((id) => this.threads.has(id))),
       going: new Set(),
       gone: new Set(),
       onHandedOver: opts.onHandedOver,
@@ -63,9 +65,12 @@ export const handoversPart = {
     // New threads start on the new runner, so a CLI started ahead of one here
     // would never be used.
     this.dropSpare('handing over');
-    // Accounts are the primary's to watch now.
+    // Accounts are the primary's to watch now, their limits too: a recheck
+    // here would start a CLI beside the primary's, and its reading would
+    // reach the primary's store past the primary's own ranDry rules.
     this.rescanTimer?.cancel();
     this.accountsTimer?.cancel();
+    this.stopLimitRecheck();
     await Promise.all([...this.threads.values()].filter((st) => !d.keep.has(st.rec.id)).map((st) => this.letGo(st)));
     this.log.info('let go of the idle threads', { keeps: [...d.keep] });
     this.checkHandovers();
@@ -184,7 +189,7 @@ export const handoversPart = {
     rt.idleTimer?.cancel();
     rt.idleTimer = undefined;
     this.flushDeltas(st);
-    if (rt.session && !rt.closing) {
+    if (runningSession(rt)) {
       this.rememberStoppedWork(st);
       this.releaseSession(st);
     }
@@ -205,7 +210,7 @@ export const handoversPart = {
     if (rt.deleted) return;
     rt.deltaTimer?.cancel();
     rt.wakeTimer?.cancel();
-    rt.generation++;
+    this.cli(st, { kind: 'drop', forget: false });
     this.store.saveIfChanged(rec);
     rt.deleted = true;
     this.dirty.delete(rec.id);

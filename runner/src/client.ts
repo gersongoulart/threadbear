@@ -22,7 +22,7 @@ export type RunnerClientOptions = {
   // Sends the token as a bearer header instead of answering a challenge.
   // Only for a runner a file in the data dir says can't answer one (a
   // draining runner older than the challenge, handover.ts); never chosen
-  // from what a server says (docs/protocol.md, "Auth").
+  // from what a server says (docs/protocol/connection.md, "Auth").
   legacyHeader?: boolean;
   authTimeoutMs?: number;
   // The kind of server this means to reach, which the proofs are bound to:
@@ -34,7 +34,7 @@ export type RunnerClientOptions = {
   socket?: import('node:net').Socket;
   // The thread whose key `token` is (tb inside a thread, tb-connect.ts). The
   // runner works the key out from this and treats the connection as that
-  // thread (docs/protocol.md, "A thread's own key").
+  // thread (docs/protocol/connection.md, "A thread's own key").
   threadId?: string;
 };
 
@@ -50,7 +50,7 @@ export class RunnerClient {
   private proving?: (msg: any) => void;
 
   // With a token, `opened` resolves once both sides have proved they have
-  // it (docs/protocol.md, "Auth"); the token itself never goes out.
+  // it (docs/protocol/connection.md, "Auth"); the token itself never goes out.
   // Without one (tests), it resolves when the socket opens.
   constructor(url: string, token?: string, opts: RunnerClientOptions = {}) {
     const legacy = Boolean(token && opts.legacyHeader);
@@ -118,7 +118,17 @@ export class RunnerClient {
     });
     this.ws.on('close', (code, reason) => {
       this.closeInfo = { code, reason: reason.toString() };
-      for (const p of this.pending.values()) p.reject(new Error(`connection closed (${code})`));
+      // 4503: the runner couldn't tell which process this is (a slow lsof on
+      // a busy Mac), so it closed rather than guess (Daybreak finding 175).
+      // 4403 with this reason: this tb is under a thread of another runner on
+      // this machine, which this runner turns away (Daybreak finding 177).
+      const why =
+        code === 4503
+          ? "connection closed (4503): the runner couldn't tell which process this is; try again"
+          : code === 4403 && reason.toString() === "under another runner's thread"
+            ? "connection closed (4403): this is under a thread of another runner on this machine, and only a thread that started this runner (or a terminal) can use it"
+            : `connection closed (${code})`;
+      for (const p of this.pending.values()) p.reject(new Error(why));
       this.pending.clear();
     });
   }

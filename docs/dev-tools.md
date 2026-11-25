@@ -16,7 +16,7 @@ runs under is the thing being changed. Today that's fragile:
 The built-in `threadbear` MCP server every session gets (create, update,
 delete and move threads; `runner/src/threadbear-mcp.ts`) was built
 separately and merged alongside this. Both are bound to the same thread
-(see "Tools for agents" in `docs/protocol.md`). A `restart_runner` MCP
+(see "Tools for agents" in `docs/protocol/tools.md`). A `restart_runner` MCP
 tool would be a thin wrapper over `runner.restart` below; it isn't built,
 since from a thread runner changes go out through the deploy script.
 
@@ -79,7 +79,7 @@ the data dir (`<home>`, normally `~/Library/Application Support/Threadbear`):
   it tries again itself after 5 s. SIGTERM (launchctl, a reboot) goes to
   every child, which get 20 s before SIGKILL (the plist's ExitTimeOut is
   30). A child that loses its IPC channel stops.
-- **Handovers** (docs/protocol.md, "Handovers"). An idle restart with busy
+- **Handovers** (docs/protocol/updates.md, "Handovers"). An idle restart with busy
   threads (a deploy, the runner following main) doesn't wait for them.
   The runner lets go of its idle threads and the port, writes
   `run/drain-<pid>.json`, and sends `{ type: "handover" }`; the
@@ -164,7 +164,7 @@ the data dir (`<home>`, normally `~/Library/Application Support/Threadbear`):
 
 ### 2. Restarting without killing the turn
 
-- **Protocol** (update `docs/protocol.md` first):
+- **Protocol** (update `docs/protocol/updates.md` first):
   - `runner.restart { when?: "idle" | "now", resume?: { threadId, text },
     reason?: string }` returns `{ scheduled: boolean, waitingFor: string[] }`
     (`waitingFor`: the ids of threads keeping it from restarting).
@@ -214,9 +214,27 @@ the data dir (`<home>`, normally `~/Library/Application Support/Threadbear`):
   filtered to one thread.
 - `tb export <id> [--out DIR]`: `thread.json`, `events.ndjson` and
   `media/` in the mock runner's fixture format, by default under
-  `app/.fixtures/threads/<id>` (private and gitignored), so a rendering bug
+  `.fixtures/threads/<id>` at the repo's top (private and gitignored), so a rendering bug
   in one of Mike's threads can be reproduced against the mock runner.
 - `tb rpc <method> [json]`: a raw call, printing the result.
+- `tb red-watch [--quiet]`: in a checkout, starts one thread to fix each
+  workflow marked `# tb land: hold while red` that's red on main, and
+  tells it when it fails again or passes (docs/thread-worktrees.md, "Red
+  on GitHub"). A schedule's check runs it every 10 minutes on Mike's Mac.
+- `tb activity` (and `--summary`): what Mike has clicked, opened, chosen and
+  sent in the app lately, or what he uses most, while he has the activity log
+  on (Settings > General; off by default, so other people's copies never
+  record). Look before changing how something works, to see how he really
+  uses it. It's his private activity: keep it out of git and out of anything
+  posted or sent.
+
+In a thread on the installed runner (`com.mikerosoft.threadbear.runner`) an
+agent has the `threadbear` MCP tools and `THREADBEAR_THREAD_ID`, so `tb self`
+and `tb status` show its thread and the runner. Both are bound to that
+thread, and neither will delete, interrupt, snooze or archive it. The runner
+puts its own `tb` on the thread's PATH; where `tb` isn't found (an older
+runner, or outside a thread) use `runner/bin/tb`. `tb --help` lists the
+rest, and `tb <command> --help` explains one.
 
 ### 4. Dev runner and one check command
 
@@ -227,7 +245,19 @@ the data dir (`<home>`, normally `~/Library/Application Support/Threadbear`):
   to `<home>/work`, the first Claude login that isn't hidden, noted or
   plan-ended, else claude-main (`runner/src/test-login.ts`; `TB_E2E_ACCOUNT`
   picks one), and claude-haiku-5-5 (`defaults.model`, which
-  the runner applies to a `threads.create` with no model).
+  the runner applies to a `threads.create` with no model), from `tb` or a
+  debug app's composer alike. Run it in the background and use the
+  `<dev home>/tb` it prints: a bare `tb` reaches the live runner unless
+  `THREADBEAR_HOME` is set in that same command. Only the thread that
+  started it (and what that thread runs), a terminal and the app can use it:
+  another thread's tb is turned away with 4403 (Daybreak finding 177,
+  docs/protocol/connection.md "Who's really calling"), so start your own.
+- Leave `--home` out, or keep it and any extra work folders under `$TMPDIR`:
+  Agent Archive skips transcripts from there, but not from `/tmp`, so a
+  try-out thread in `/tmp` ends up in Mike's archive.
+- Stop it with the `kill <pid>` it prints, never `pkill`, and before you
+  deploy or end your turn: the live runner's restart waits for it. Its temp
+  data dir goes with it (`--keep` keeps it).
 - Trying something on real-sized data (a sidebar with hundreds of
   threads, a long transcript): `dev-runner.sh --clone-real [FROM]`, never
   `--home` on a copy of the real data dir. A copy's threads name Mike's
@@ -248,7 +278,7 @@ the data dir (`<home>`, normally `~/Library/Application Support/Threadbear`):
   than stopping the live runner's CLIs it names. `--home` on a folder
   holding a thread whose folder isn't under `$TMPDIR` is refused.
   `test/unit/real-copy.test.ts` covers it.
-- `./check.sh [--quick | --app] [--e2e] [--shots DIR] [--only STEPS]` at the repo root:
+- `./check.sh [--quick | --app] [--all] [--fresh] [--e2e] [--shots DIR] [--only STEPS]` at the repo root:
   runner typecheck, unit tests and deploy tests, app `swift build` and
   `swift test` (with the mock runner's packages installed and its tests
   required). `--app` is the app's part alone. `--e2e`
@@ -258,7 +288,11 @@ the data dir (`<home>`, normally `~/Library/Application Support/Threadbear`):
   run ends with the `./check.sh --only` that runs what failed again, which `tb land`
   uses to find the landing that broke a group
   (docs/thread-worktrees.md, "Finding who broke a group"). One line per step, nonzero exit if
-  anything failed, on the Node `runner/scripts/find-node.sh` picks.
+  anything failed, on the Node `runner/scripts/find-node.sh` picks. A step
+  or runner test file that passed in the last week with the same inputs is
+  skipped, its ok line saying when (docs/thread-worktrees.md, "What passed
+  before is skipped"); `--fresh` (`tb land --full`) and `--all` read no
+  records.
   Unit tests preload `runner/test/helpers/clean-env.ts`: each process gets
   a temporary HOME and XDG folders, and inherited account/data overrides
   are cleared. `private-home.ts` rejects reads of real Claude, Codex,
@@ -269,16 +303,84 @@ the data dir (`<home>`, normally `~/Library/Application Support/Threadbear`):
   The shared fake-runner helpers also load this setup for single-file
   `node --test` runs. Discovery fixtures supply their own `userHome` and
   `pathEnv`, so installed CLIs on the check host cannot add accounts.
+- What `./check.sh` runs: `--quick` is the runner's typecheck and unit tests
+  (about a minute), the Mac app's release build when `app/` or `dock/`
+  changed, and the GPUI port's core and client tests and a `cargo check` of
+  the GPUI app when `desktop/` changed; the full run adds a `cargo check` of
+  the whole workspace; `--app` is the app's build and tests, for a change
+  outside `runner/`. It lints the code files a landing changed (everything
+  when the lint setup or packages change) with mikecann-lint
+  (`eslint.config.mjs`): fix the cause the message names; old problems are
+  exempt in `eslint-suppressions.json`, and a disable comment needs a reason
+  after `--`. GitHub runs the same lint, all of it, on pull requests and
+  main (`.github/workflows/lint.yml`). It skips the deploy tests and BearDock's unless something they
+  cover changed from main (`--all` runs them anyway). The Swift app's part is
+  under a minute with a warm `app/.build` and 5 to 10 minutes in a folder
+  that has never built, so run it in the background. Nothing in it touches
+  the live runner. A failure prints what failed and keeps the logs; it says
+  where, so delete them when you're done.
+- Where it runs: on a check host (`checkHosts` in runner.json: Tinker Desk,
+  or the cloud box for a `--quick` run), never Mike's Mac, as three threads'
+  suites at once took it to a load of 75 and a test window came up over his
+  browser (6 Nov); a hook blocks `npm test` and `check.sh --local` there. It
+  copies the checkout over, runs it, brings back failed steps' logs and
+  deletes the copy (`scripts/check-remote.sh`); one run at a time, so it may
+  say it's waiting for another thread's. A landing's check (tb land sets
+  `THREADBEAR_CHECK_FIRST`) goes ahead of everything else waiting on its
+  host: other checks, GPUI builds,
+  measurements and Tinker Desk's `heavy` jobs say they're letting it go
+  first (`scripts/host-turn.sh` says how). It still waits for what's
+  running; it doesn't get a slot of its own. A landing's check that needs a
+  Mac is split when a Linux host and a Mac both answer: the steps a Linux
+  host can run (`LINUX_STEPS` in check-remote.sh, `check.sh --part linux`)
+  go to the cloud box and the rest (`--part mac`: the Swift ones) to Tinker
+  Desk, at the same time, and it passes only if both halves do. The Mac half
+  also checks the desktop app's macOS build (`desktop macos check`), which
+  the Linux host can't compile. Its output
+  shows each half's lines marked `[no Mac]` and `[Mac]` as they come, then
+  the two merged as one check, `Checking on cloud+tinker-desk`. With only
+  one kind of host answering it runs whole as before; a Linux half no Linux
+  host could take runs on the Mac too. A host short of disk is passed over
+  (8 GiB free for Swift or desktop/'s Rust, 2 otherwise), and if none has
+  room the check fails and names them. A check that fails on a host that ran
+  under 1 GiB free during it is run again on another host (or the same one,
+  after idle build folders there are given back), twice at most; out of disk
+  every time, it ends as no host able to run it (exit 69 under `tb land`),
+  which blames no landing. Under 12 GiB free, a run first gives back idle
+  build folders, including cargo targets made by hand in
+  `~/.cache/threadbear-check` (longest unused first; any idle three days go
+  anyway), so build into those only through `desktop/scripts/remote.sh`.
+  A host that stops answering partway is dropped for the
+  next one; if none can be reached it runs here at low priority. `--e2e`
+  always runs here, as it needs the claude login.
+- Tinker Desk's GPUI build folder (`~/.cache/threadbear-check/gpui`) is a
+  volume on its external SSD mounted there, not a link (remote.sh refuses
+  links on that path). A `--desk` run that sits with no output may be waiting
+  on macOS asking Desk Runner to reach a removable volume:
+  `desk "screencapture -x /tmp/s.png"` shows the screen (17 Nov). Fix that
+  yourself, never ask Mike (19 Nov: "I want you to be able to access that
+  hard drive"):
+  `desk "open 'x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_FilesAndFolders'"`,
+  click Desk Runner.app's row open with a CGEvent click run through `desk`
+  (it has Accessibility) and see Removable Volumes is on. On 19 Nov it was on
+  already, and opening the row was enough. Close System Settings after.
+- Builds on Mike's Mac go one at a time: `scripts/one-build.sh <command>`
+  holds a lock for the machine while it runs (three threads' app and iPhone
+  builds at once, 9 Nov). The build scripts (build-app.sh, dev-app.sh,
+  sim-shots.sh, install-phone.sh) take it themselves, and his hook puts a
+  bare `swift build`/`swift test`/`xcodebuild` through it; a build that says
+  it's waiting for another is that, so give it a longer timeout.
 
 ### 5. Docs
 
-`AGENTS.md` ("Working on Threadbear from inside Threadbear", kept short),
-`runner/README.md`, `docs/protocol.md`.
+`AGENTS.md` (kept short, pointing here), `runner/README.md`,
+`docs/protocol.md`.
 
 ## Phase 2: app side
 
 Built on 2026-10-27. How to use it is in `app/README.md` ("Seeing and
-driving it from a script") and in AGENTS.md ("Seeing and driving the app").
+driving it from a script"), and for the GPUI app in `desktop/README.md`
+("Seeing and driving it on a Mac").
 
 - `app/Tools/dev-app.sh start [--mock [--fixtures DIR]...] [--home DIR]
   [--appearance light|dark] [--size WxH] [--id NAME]`, then `do
@@ -403,6 +505,45 @@ disturbs an agent's `swift build` in the checkout.
 
 ## The runner updating itself
 
+Shipping a runner change, in short: merge it to main (`tb land` from a
+thread's own worktree), and the live runner builds a release of main within
+about five minutes and restarts onto it once no thread is busy, which ends
+your turn if it's still running then (`tb status` shows the update's state
+and the pending restart; `tb logs` the result). To ship it sooner, or to get
+a resume into your thread afterwards, run `runner/scripts/deploy-runner.sh
+--dry-run` and then `runner/scripts/deploy-runner.sh` from main: it ships
+HEAD of that checkout. When it says so, end your turn: the runner restarts
+once no thread is busy and resumes the thread so you can check the change
+(if it says it won't resume it, tell Mike in your reply).
+`deploy-runner.sh --list` shows what's running. If the message that resumes
+you says your release isn't running, read `tb logs` before anything else.
+To undo a deploy, `deploy-runner.sh --rollback`; after an automatic crash
+rollback there's nothing to undo. A release that failed to build from main
+is said once in the app and in `tb status`, with its output in
+`<home>/runner/update.log`; fix it on main and it tries again.
+
+Until `deploy-runner.sh --list` shows releases, the live runner still runs
+from the main checkout and only Mike can switch it (one `install-runner.sh`
+from a terminal), so runner changes wait for him. Once `launch.mjs`
+supervises the runner (since Mike's `install-runner.sh` after 27 Oct), a
+restart with busy threads is a handover: the new release takes over at once,
+and busy threads (the deploying one included) finish their turns on the old
+runner, then move across. `deploy-runner.sh` says which happened. Otherwise
+a restart waits for other threads' turns and background jobs (tests,
+builds, subagents; background ones for 30 minutes at most). `tb status`
+shows what it's waiting for, or the old runner and what it's finishing;
+don't try to hurry either.
+
+The LaunchAgent's program is `~/Applications/Threadbear Runner.app`
+(`runner/launcher/`), a small app that runs `node launch.mjs` so macOS's
+privacy prompts say "Threadbear Runner", not "node". Releases never rebuild
+it: a change under `runner/launcher/` only ships through a reinstall. Once
+it's on main the runner stages it by itself to take over at Mike's next
+login (`runner/src/reinstall.ts`; the Updates panel's Update tries again
+after a failure); say so in your end_turn too.
+
+The details:
+
 Added 2026-10-27, the same day. A runner that runs from a release follows
 main too (`runner/src/update.ts`). Starting 30 seconds after its release
 is marked good, and every five minutes after that, it brings its own clone
@@ -505,7 +646,12 @@ rollback covers a release that doesn't come up.
   minutes, starts the fix thread in its own checkout (`RemoteUpdateFixer`
   in `runner/src/fix-update.ts`): once per runner and commit, whatever kind
   it says, at most one thread or message per runner every 10 minutes, and
-  only for a commit on its own main or GitHub's. A report the main Mac
+  only for a commit on its own main or GitHub's. Its prompt has only what
+  the main Mac checked itself (the runner's id, the kind, the commit's
+  short id and subject from its own repo), never the machine's error text,
+  log path or name: those are that key's words, and the thread starts with
+  no Start card (Codex Security, 21 Nov). It reads them on that machine,
+  through a thread there. A report the main Mac
   hasn't fixed in 12 hours (its runner older than the backend, say) is
   handed over from the machine as before.
   Before, that machine's thread asked the main Mac for one, and a runner

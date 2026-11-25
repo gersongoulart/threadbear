@@ -39,6 +39,15 @@ Feature: The chips under the message box
     When I pick "High" from the "model" menu
     Then the model chip says "Claude · Fable 5.1 · High"
 
+  # A pool with logins of several providers lists each one's models under
+  # its name (the Swift picker's sections). The GPUI picker showed only the
+  # first login's provider until 20 Nov, so OpenCode's Gemini models in
+  # Mike's Main pool were nowhere to be picked.
+  @composer.modelpicker
+  Scenario: A pool of Codex and Claude logins lists both providers' models
+    Then the "model" menu has a row "## Codex"
+    And the "model" menu has a row "## Claude"
+
   # The Login line under the effort levels (Mike's pick, 12 Nov): the Swift
   # app is frozen with its "Pinned to … · Unpin" line, so these are GPUI's.
   @composer.modelpicker @swift-pending
@@ -107,6 +116,40 @@ Feature: The chips under the message box
     Then right-clicking Send offers "Schedule…"
     When I right-click Send and choose "Schedule…"
     Then the schedule editor is open on a new schedule that sends "Check the backups tonight"
+
+  # The arrow beside Send and its quick times are the GPUI app's; the Swift
+  # app is frozen.
+  @composer.schedulefromsend @swift-pending
+  Scenario: The arrow beside Send offers quick times to send the message later
+    When I open the Send later menu beside Send
+    Then the Send later menu offers "Send tomorrow at 9 am…" and a time for when tokens reset
+
+  @composer.schedulefromsend @swift-pending
+  Scenario: Send tomorrow opens the schedule editor on Once, at 9 tomorrow morning
+    When I type "Check the backups tomorrow" in the composer
+    Then right-clicking Send offers "Send tomorrow at 9 am… | Schedule…"
+    When I right-click Send and choose "Send tomorrow at 9 am…"
+    Then the schedule editor is open on a new schedule that sends "Check the backups tomorrow"
+    And the schedule is set to send once, tomorrow at 9 am
+
+  # Morning brief is on the Claude pool, whose alex+4 is out of room until
+  # its 5-hour window resets; the others have room or old readings.
+  @composer.schedulefromsend @swift-pending
+  Scenario: Send when tokens reset waits for the pool's first login back, plus a minute
+    When I type "Run the checks after my allowance resets" in the composer
+    And I choose when tokens reset from Send's right-click
+    Then the schedule editor is open on a new schedule that sends "Run the checks after my allowance resets"
+    And the schedule is set to send once, a minute after "claude-4"'s 5-hour window resets
+
+  @composer.schedulefromsend @swift-pending
+  Scenario: A quick time from the new-thread box saves a schedule that starts a new thread
+    When I start a new thread
+    And I type "Review tomorrow's build" in the composer
+    And I right-click Send and choose "Send tomorrow at 9 am…"
+    And I save the schedule in the editor
+    And I click "Scheduled" in the activity bar
+    Then the "Active" section lists "Review tomorrow's build"
+    And the schedule "Review tomorrow's build" sends to "New thread in misc"
 
   @composer.schedulefromsend @remote-threads
   Scenario: Another Mac's thread has no Schedule… on Send, as its schedules are made there

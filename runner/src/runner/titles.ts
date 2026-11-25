@@ -8,7 +8,7 @@ import { ErrorCode, RpcError } from '../protocol.ts';
 import { EXPLAIN_SYSTEM, RECENT_CHARS, RECENT_MESSAGES, explainPrompt } from '../explain.ts';
 import type { ExplainTurn } from '../explain.ts';
 import type { ThreadState } from '../runner.ts';
-import { TITLE_PROMPT, cleanTitle } from '../runner.ts';
+import { TITLE_PROMPT, cleanTitle } from './messages.ts';
 import { cutSafely } from '../safe-cut.ts';
 import { cleanKeywords } from '../keywords.ts';
 
@@ -101,7 +101,7 @@ export const titlesPart = {
     this.highlightsChanged(st);
   },
 
-  // The librarian's search words for a thread (docs/protocol.md, "Search"):
+  // The librarian's search words for a thread (docs/protocol/threads.md, "Search"):
   // lowercase words, each once, none already in its title. An empty answer
   // still marks it looked at, so the keyword sweep doesn't ask again.
   setKeywords(this: Runner, threadId: string, words: string): void {

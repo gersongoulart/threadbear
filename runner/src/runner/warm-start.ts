@@ -1,4 +1,4 @@
-// Warm start (experiment warmStart): the CLI for a new thread starts while
+// Warm start: the CLI for a new thread starts while
 // Mike is still writing its first message, so the message goes to a CLI
 // that's ready rather than one that still has to boot.
 //
@@ -6,7 +6,7 @@
 // (0.56 s on Tinker Desk's M2 in ADEMark's A4, 20 Nov 2026; 0.8 s cold
 // against 0.05 s pre-started on the M5), and every new thread paid it after
 // Enter. The app asks for one with `threads.warm` when its new-thread page
-// opens (docs/protocol.md, "Warm start"); the runner starts a session under
+// opens (docs/protocol/connection.md, "Warm start"); the runner starts a session under
 // an id it keeps for the thread, with the options the page's settings work
 // out to. `threads.create` with that `warmId` makes the thread under the id,
 // and its first start takes the running CLI if every option still matches,
@@ -16,13 +16,11 @@
 // it's stopped when that connection closes (the app quitting leaves nothing
 // behind), when the runner stops, and after SPARE_MS unused.
 import type { Runner, ThreadState } from '../runner.ts';
-import { newRuntime } from '../runner.ts';
+import { newRuntime } from './runtime.ts';
 import type { RunnerPart } from './part.ts';
 import type { AdapterOutput, AgentSession, QuestionAnswer, QuestionRequest, SessionSink, StartSessionOptions, ToolApprovalAnswer, ToolApprovalRequest } from '../adapters/types.ts';
-import type { EffortLevel, PermissionMode } from '../protocol.ts';
-import { experimentOn } from '../experiments.ts';
+import type { EffortLevel, PermissionMode, Provider } from '../protocol.ts';
 
-export const WARM_START = 'warmStart';
 // Unused this long, a spare is stopped: a page left open over lunch
 // shouldn't hold a CLI.
 export const SPARE_MS = 10 * 60_000;
@@ -34,6 +32,7 @@ export type WarmParams = {
   cwd?: string;
   accountId?: string;
   poolId?: string;
+  provider?: Provider;
   model?: string;
   effort?: EffortLevel;
   permissionMode?: PermissionMode;
@@ -99,11 +98,11 @@ export function spareKey(opts: StartSessionOptions): string {
 
 export const warmStartPart = {
   // threads.warm: starts (or keeps) the spare for a new thread with these
-  // settings, and says its id. Nothing when the experiment is off, or the
-  // thread wouldn't start straight away in the folder as it is (a worktree
-  // first, a project's brief, another provider).
+  // settings, and says its id. Nothing when the thread wouldn't start
+  // straight away in the folder as it is (a worktree first, a project's
+  // brief, another provider).
   warm(this: Runner, params: WarmParams, conn?: number): { warmId?: string } {
-    if (!experimentOn(this.cfg.home, WARM_START) || params.projectIds?.length) {
+    if (params.projectIds?.length) {
       this.dropSpare();
       return {};
     }
@@ -169,7 +168,7 @@ export const warmStartPart = {
       // when making the thread failed.
       const st = this.threads.get(spare.id);
       if (st && st.rt.spare !== spare) return;
-      if (st) st.rt.spare = undefined;
+      if (st) this.cli(st, { kind: 'spareGone', spare });
       this.log.info('stopping the CLI started ahead of a thread that never used it', { threadId: spare.id });
       spare.session.kill();
     }, CLAIMED_MS);
@@ -180,9 +179,9 @@ export const warmStartPart = {
   // From startSession: the spare's CLI when it was started with exactly
   // these options and is still running; otherwise it's stopped.
   takeSpare(this: Runner, st: ThreadState, opts: StartSessionOptions, sink: SessionSink): AgentSession | undefined {
-    const spare = st.rt.spare;
+    const taken = this.cli(st, { kind: 'takeSpare' });
+    const spare = taken.ok ? taken.out.spare : undefined;
     if (!spare) return undefined;
-    st.rt.spare = undefined;
     clearTimeout(spare.timer);
     if (!spare.relay.exitedEarly && spare.key === spareKey(opts)) {
       spare.relay.attach(sink);
