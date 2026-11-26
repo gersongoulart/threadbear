@@ -17,7 +17,6 @@ for (const disposition of ['archive', 'delete'] as const) {
   test(`a shared-folder fork keeps its workspace after source ${disposition}, then releases it when the last child archives`, async () => {
     const { main } = makeRepo();
     const h = harness();
-    fs.writeFileSync(path.join(h.home, 'runner.json'), JSON.stringify({ experiments: { conversationForks: true } }));
     (h.adapter as AgentAdapter).forkSession = async () => ({ sessionId: crypto.randomUUID() });
     const source = await threadWithWorktree(h, main);
     const child = await h.runner.forkThread(source.id, { workspace: 'same', requestId: crypto.randomUUID() });
@@ -35,7 +34,6 @@ for (const disposition of ['archive', 'delete'] as const) {
 test('reopening a shared source waits for the last child cleanup and keeps the active checkout', async () => {
   const { main } = makeRepo();
   const h = harness();
-  fs.writeFileSync(path.join(h.home, 'runner.json'), JSON.stringify({ experiments: { conversationForks: true } }));
   (h.adapter as AgentAdapter).forkSession = async () => ({ sessionId: crypto.randomUUID() });
   const source = await threadWithWorktree(h, main);
   const child = await h.runner.forkThread(source.id, { workspace: 'same', requestId: crypto.randomUUID() });
@@ -84,7 +82,6 @@ test('deleting during archive teardown queues a deletion cleanup after it', asyn
 test('a source reopened after shared removal was dispatched resumes in an existing checkout', async () => {
   const { main } = makeRepo();
   const h = harness();
-  fs.writeFileSync(path.join(h.home, 'runner.json'), JSON.stringify({ experiments: { conversationForks: true } }));
   (h.adapter as AgentAdapter).forkSession = async () => ({ sessionId: crypto.randomUUID() });
   const source = await threadWithWorktree(h, main);
   const child = await h.runner.forkThread(source.id, { workspace: 'same', requestId: crypto.randomUUID() });

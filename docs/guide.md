@@ -622,8 +622,7 @@ thread as leaked and replace it, since the AI provider has seen it too.
 
 <!-- picture: /clips/decisions.mp4 alt: A thread ends with what it needs from you, and one tap answers each -->
 
-With the Conversation forks experiment enabled, an idle Claude or Codex
-thread can be copied with Fork… in its menu, or `/fork` in the desktop
+An idle Claude or Codex thread can be copied with Fork… in its menu, or `/fork` in the desktop
 message box. Each completed reply also has a small branch icon beside its
 time and cost: “Fork from here” copies the conversation through that reply,
 leaving later replies out. Choose Same folder to share its files, or New worktree for a

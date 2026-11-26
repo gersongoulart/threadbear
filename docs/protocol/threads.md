@@ -275,7 +275,7 @@ after the ones it does.
 
 ## Forking a conversation
 
-The `conversationForks` experiment enables native conversation copies for
+Native conversation copies are available for
 Claude and Codex. `threads.forkInfo { threadId }` returns `{ available,
 reason?, workspace?: { root, head, untracked: string[] } }`. Available means
 the source is idle, has a saved native session, and has no queued messages,

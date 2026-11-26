@@ -10,7 +10,6 @@ import { makeHarness, tick } from '../helpers/fakes.ts';
 
 function harness() {
   const h = makeHarness();
-  fs.writeFileSync(path.join(h.home, 'runner.json'), JSON.stringify({ experiments: { conversationForks: true } }));
   const calls: Parameters<NonNullable<AgentAdapter['forkSession']>>[0][] = [];
   (h.adapter as AgentAdapter).forkSession = async (request) => {
     calls.push(request);

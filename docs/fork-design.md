@@ -96,9 +96,9 @@ the result opens on that runner. Phone and web read forked history and source
 provenance through the existing mirror. Creation controls on phone and web
 are deferred and explicitly documented in parity.ts.
 
-New behavior ships behind an off-by-default conversationForks experiment,
-enabled for Gerson only after implementation verification. Record its guide,
-removal instructions and check-in schedule using existing experiment machinery.
+Originally shipped behind an off-by-default experiment, enabled for Gerson
+after implementation verification. On 25 Nov 2026, Gerson approved making
+conversation forks standard and removing the experiment switch.
 Keep the frozen Swift app unchanged.
 
 ## Acceptance checks

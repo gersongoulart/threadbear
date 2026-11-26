@@ -304,11 +304,7 @@ impl Composer {
                     t.new_thread.prefs.recent_slash.clone(),
                 )
             });
-        if self.thread_id.is_some()
-            && app
-                .as_ref()
-                .is_some_and(|a| a.read(cx).conversation_forks_enabled())
-        {
+        if self.thread_id.is_some() {
             all.retain(|c| c.name != "fork");
             all.insert(
                 0,

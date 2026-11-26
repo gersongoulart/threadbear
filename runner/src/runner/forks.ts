@@ -9,7 +9,6 @@ import type { RunnerPart } from './part.ts';
 import type { ThreadRecord } from '../store.ts';
 import { cutOut } from '../store.ts';
 import { ErrorCode, RpcError, type PersistedEvent, type ThreadSummary } from '../protocol.ts';
-import { experimentOn } from '../experiments.ts';
 import { forkWorkspaceInfo, makeForkWorkspace, type ForkWorkspaceInfo } from '../fork-workspace.ts';
 import { findWorktreePatch } from '../patches.ts';
 import { worktreeInstructions } from '../worktrees.ts';
@@ -23,7 +22,6 @@ const pendingForks = new WeakMap<Runner, Map<string, PendingFork>>();
 
 function unavailable(runner: Runner, st: ThreadState): string | undefined {
   const { rec, rt } = st;
-  if (!experimentOn(runner.cfg.home, 'conversationForks')) return 'Conversation forks are turned off in Settings > General > Experiments.';
   if (runner.boxThread !== undefined) return 'A virtual runner can only host its assigned thread.';
   if (!runner.adapters[rec.provider]?.forkSession) return 'This provider does not support conversation forks.';
   if (rt.holds?.size || rt.forking || rt.editing || rt.moving || rt.turn || rt.tasks.length || rt.runningActions?.size || rt.hooksRunning || rt.cleaning || rt.preparing || rt.wakeTimer || rec.subagents?.some((a) => a.status === 'running') || rec.queue.length || rec.pendingApprovals.length || rt.approvals.size || ['starting', 'running', 'waiting'].includes(rec.status)) return 'Wait for this thread to finish and become idle before forking.';

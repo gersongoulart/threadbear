@@ -209,7 +209,6 @@ export async function playInto(post: Post, runner: { key: string; runnerId: stri
     let lastPlan = '';
     await play({
       fork: async (throughFirstReply) => {
-        fs.writeFileSync(path.join(h.home, 'runner.json'), JSON.stringify({ experiments: { conversationForks: true } }));
         (h.adapter as AgentAdapter).forkSession = async () => ({ sessionId: crypto.randomUUID() });
         const throughTurnId = throughFirstReply ? h.runner.events(thread.id).events.find(e => e.type === 'turn.completed')?.turnId : undefined;
         const copy = await h.runner.forkThread(thread.id, { workspace: 'same', requestId: crypto.randomUUID(), ...(throughTurnId ? { throughTurnId } : {}) });

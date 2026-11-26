@@ -936,11 +936,7 @@ impl ThreadPane {
             .text_size(px(size::SMALL))
             .text_color(color)
             .child(words);
-        if let Some(app) = self
-            .app
-            .upgrade()
-            .filter(|app| app.read(cx).conversation_forks_enabled())
-        {
+        if let Some(app) = self.app.upgrade() {
             let id = self.summary.id.clone();
             let turn = done.turn_id.clone();
             let hover = style::hover_fill(cx);

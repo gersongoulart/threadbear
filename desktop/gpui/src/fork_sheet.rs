@@ -17,12 +17,6 @@ use threadbear_client::runner::Client;
 use threadbear_core::inbox::ThreadSummary;
 
 impl Threadbear {
-    pub(crate) fn conversation_forks_enabled(&self) -> bool {
-        self.remote
-            .experiments
-            .iter()
-            .any(|e| e == "conversationForks")
-    }
     pub(crate) fn open_fork(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.open_fork_at(id, None, window, cx);
     }
@@ -33,13 +27,6 @@ impl Threadbear {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.conversation_forks_enabled() {
-            self.show_error(
-                "Conversation forks are turned off in Settings > General > Experiments.".into(),
-                cx,
-            );
-            return;
-        }
         if self.fork_sheet.is_some() {
             return;
         }

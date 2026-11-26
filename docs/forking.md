@@ -7,11 +7,16 @@ and points `upstream` at `mikecann/threadbear`. Read on if you want to
 publish your own build (your own App Store app, your own crash reports,
 your own releases for others) or take features out.
 
-Conversation forks are an off-by-default experiment documented in
-`runner/src/experiments/conversationForks.md`. Its removal instructions
-name the runner snapshot operation, native provider copies, Git workspace
-helper and GPUI controls. Existing forked conversations remain ordinary
-resumable threads if those creation controls are removed. The implementation
+Conversation forks are standard. To remove creation controls, remove the
+runner snapshot operation (`runner/src/runner/forks.ts`), native provider
+copies, Git workspace helper (`runner/src/fork-workspace.ts`) and GPUI
+controls (`desktop/gpui/src/fork_sheet.rs`, reply footer, thread menu and
+slash command), plus their protocol and relay calls. Existing forked
+conversations remain ordinary resumable threads if those creation controls
+are removed; keep their native sessions and readable source-link notes.
+Keep `forkedFrom` while first-message identity correction or request
+deduplication needs it, and retain shared-worktree cleanup protection while
+existing forks share managed checkouts. The implementation
 contains no Mike-specific account, host or filesystem path.
 
 ## 1. What's Mike's, and where

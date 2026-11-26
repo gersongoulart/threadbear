@@ -8,7 +8,7 @@ File references are where to look.
 
 ## Conversation forks
 
-The off-by-default Conversation forks experiment copies native Claude or
+Conversation forks copy native Claude or
 Codex session history into a new session under the same account's existing
 configuration folder, and copies attachments and tool-output blobs into the
 new thread's data folder. A separate-worktree fork creates a Git worktree

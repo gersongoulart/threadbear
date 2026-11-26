@@ -1489,11 +1489,9 @@ impl Threadbear {
             },
             MenuRow::submenu("Hibernate", "moon.zzz", self.snooze_menu_rows()),
         ];
-        if self.conversation_forks_enabled() {
-            let mut fork = MenuRow::item("Fork…", "arrow.triangle.branch", MenuAction::Fork);
-            fork.enabled = !t.busy();
-            rows.push(fork);
-        }
+        let mut fork = MenuRow::item("Fork…", "arrow.triangle.branch", MenuAction::Fork);
+        fork.enabled = !t.busy();
+        rows.push(fork);
         if t.snoozed_until.is_some() {
             rows.push(MenuRow::item("Wake", "sun.max", MenuAction::Wake));
         }

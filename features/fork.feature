@@ -16,7 +16,7 @@ Feature: Fork a conversation
     Then the idle fork "Morning brief (fork)" opens
     And the fork contains the first reply without the later reply
 
-  # Swift is frozen; this is a new GPUI experiment.
+  # Swift is frozen; conversation forks are a GPUI feature.
   @threads.fork @swift-pending
   Scenario: The slash command opens the chooser without sending a message
     When I open the fork chooser with the slash command

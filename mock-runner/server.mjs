@@ -477,11 +477,10 @@ let connectors = {
 };
 addDemoProjects();
 if (process.env.TB_MOCK_LIVE_PAGES) addLivePageDemo(process.env.TB_MOCK_LIVE_PAGES);
-// The mock also enables conversation forks when TB_MOCK_FORKS is set.
+// TB_MOCK_FORKS selects special conversation-fork demo behavior.
 let mockForkMode = process.env.TB_MOCK_FORKS;
 function mockExperiments() {
   return [
-    ...(process.env.TB_MOCK_FORKS ? ['conversationForks'] : []),
     // TB_MOCK_NESTED_OFF keeps its demo threads with the experiment off.
     ...(process.env.TB_MOCK_NESTED && !process.env.TB_MOCK_NESTED_OFF ? ['nestedThreads'] : []),
     ...(process.env.TB_MOCK_INBOX_GUESS ? ['inboxGuess'] : []),
@@ -976,14 +975,13 @@ async function dispatch(client, method, p) {
     }
     case 'threads.forkInfo': {
       const source = threads.get(p.threadId);
-      if (!process.env.TB_MOCK_FORKS) return { available: false, reason: 'Conversation forks are turned off.' };
       if (!source) throw rpcError(-32602, 'Thread not found');
       if (['running', 'starting', 'stopping'].includes(source.summary.status)) return { available: false, reason: 'Wait for this conversation to finish its turn.' };
       return { available: true, ...(mockForkMode === 'no-git' ? {} : { workspace: { root: source.summary.cwd, head: 'cbc38a03', untracked: ['notes.txt', 'scratch/output.json'] } }) };
     }
     case 'threads.fork': {
       const source = threads.get(p.threadId);
-      if (!process.env.TB_MOCK_FORKS || !source) throw rpcError(-32602, 'Conversation cannot be forked');
+      if (!source) throw rpcError(-32602, 'Conversation cannot be forked');
       const previous = [...threads.values()].find(t => t.forkRequestId === p.requestId);
       if (previous) return { thread: previous.summary };
       // Slow enough for the progress and duplicate-click specs to observe.
