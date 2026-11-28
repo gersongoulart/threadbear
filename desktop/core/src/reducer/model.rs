@@ -2296,7 +2296,11 @@ impl TranscriptModel {
     /// edit of Mike's leaves stays.
     fn stays_out(&self, k: usize, replies: &HashSet<usize>) -> bool {
         let item = &self.items[k];
-        if item.fork_note || replies.contains(&k) || item.id.starts_with("rw:") || item.content.is_standalone_note() {
+        if item.fork_note
+            || replies.contains(&k)
+            || item.id.starts_with("rw:")
+            || item.content.is_standalone_note()
+        {
             return true;
         }
         match &item.content {
